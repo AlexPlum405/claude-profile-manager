@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clave</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="window">
+    <!-- Titlebar -->
+    <div class="titlebar">
+      <div class="app-title">
+        <div class="dot"></div>
+        <span class="title-text">Clave</span>
+      </div>
+      <div class="badge" id="status">配置已同步</div>
+      <div class="window-buttons">
+        <button class="win-btn" onclick="refreshAll()">刷新</button>
+        <button class="win-btn" onclick="openFolder()">打开文件夹</button>
+      </div>
+      <div class="window-controls">
+        <button class="control-btn minimize-btn" onclick="minimizeWindow()">
+          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="0" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button class="control-btn maximize-btn" onclick="maximizeWindow()">
+          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+        <button class="control-btn close-btn" onclick="closeWindow()">
+          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1" y1="1" x2="11" y2="11" stroke="currentColor" stroke-width="1"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor" stroke-width="1"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div class="content">
+      <!-- Sidebar -->
+      <div class="sidebar">
+        <div class="sidebar-title">配置列表</div>
+        <div class="sidebar-subtitle">快速切换与编辑</div>
+        <div class="sidebar-list" id="profileList"></div>
+        <div class="sidebar-footer">
+          <div class="footer-title">使用说明</div>
+          <div class="footer-body">选择一个配置，编辑内容后保存或激活。</div>
+        </div>
+      </div>
+
+      <!-- Main -->
+      <div class="main">
+        <div class="main-title">编辑配置</div>
+        <div class="main-subtitle">修改名称、地址、密钥和原始 JSON</div>
+        <div class="main-fields">
+          <div class="info-card">
+            <div class="info-label">配置名称</div>
+            <input id="profileName" class="info-input" type="text" placeholder="例如：en01" />
+          </div>
+          <div class="info-card">
+            <div class="info-label">基础地址</div>
+            <input id="baseUrl" class="info-input" type="text" placeholder="https://en01.imds.ai/" />
+          </div>
+          <div class="info-card">
+            <div class="info-label">API 密钥</div>
+            <input id="apiKey" class="info-input" type="text" placeholder="sk-..." />
+          </div>
+        </div>
+        <div class="json-card">
+          <div class="json-label">原始 settings.json</div>
+          <textarea id="profileJson" class="json-body" spellcheck="false"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- Statusbar -->
+    <div class="statusbar">
+      <span class="status-text" id="footerHint">状态：未检测到激活配置</span>
+      <div class="action-buttons">
+        <button class="btn btn-save" onclick="saveCurrent()">保存</button>
+        <button class="btn btn-new" onclick="createNewProfile()">新建</button>
+        <button class="btn btn-delete" onclick="deleteCurrent()">删除</button>
+        <button class="btn btn-test" onclick="testCurrent()">测试</button>
+        <button class="btn btn-activate" onclick="activateCurrent()">激活</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
