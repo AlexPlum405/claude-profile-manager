@@ -248,9 +248,9 @@ function selectProfileItem(name) {
   const items = document.querySelectorAll('.sidebar-item');
   items.forEach(item => {
     if (item.dataset.profile === name) {
-      item.classList.add('active');
+      item.classList.add('selected');
     } else {
-      item.classList.remove('active');
+      item.classList.remove('selected');
     }
   });
 }
@@ -347,32 +347,70 @@ function createNewProfile() {
   });
 }
 
+// ── Notification System ──
+function showToast(message, type = 'info') {
+  const container = document.getElementById('toastContainer');
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  
+  let icon = 'ℹ️';
+  if (type === 'success') icon = '✅';
+  if (type === 'error') icon = '❌';
+  if (type === 'warning') icon = '⚠️';
+
+  toast.innerHTML = `
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span>${icon}</span>
+      <span>${message}</span>
+    </div>
+  `;
+
+  container.appendChild(toast);
+
+  // Auto remove
+  setTimeout(() => {
+    toast.classList.add('hide');
+    setTimeout(() => container.removeChild(toast), 300);
+  }, 3000);
+}
+
+// Override original showAlert with Toast for lightweight notifications
+function showAlert(message) {
+  // If message looks like a success message, use success type
+  const isSuccess = message.includes('保存') || message.includes('启用') || message.includes('成功');
+  const isError = message.includes('失败') || message.includes('无效') || message.includes('连接失败');
+  
+  showToast(message, isSuccess ? 'success' : (isError ? 'error' : 'info'));
+}
+
 function showInputDialog(message, defaultValue, callback) {
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  overlay.className = 'dialog-overlay';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(2px);z-index:10000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.2s ease-out;';
 
   const dialog = document.createElement('div');
-  dialog.style.cssText = 'background:white;padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.3);min-width:300px;';
+  dialog.style.cssText = 'background:white;padding:24px;border-radius:12px;box-shadow:var(--shadow-window);min-width:320px;animation:slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);';
 
   const label = document.createElement('div');
   label.textContent = message;
-  label.style.cssText = 'margin-bottom:15px;font-size:14px;color:#333;';
+  label.style.cssText = 'margin-bottom:16px;font-size:14px;font-weight:600;color:var(--text-main);';
 
   const input = document.createElement('input');
   input.type = 'text';
   input.value = defaultValue || '';
-  input.style.cssText = 'width:100%;padding:8px;font-size:14px;border:1px solid #ddd;border-radius:4px;box-sizing:border-box;margin-bottom:15px;';
+  input.className = 'info-input';
+  input.style.cssText = 'width:100%;margin-bottom:20px;';
 
   const btnContainer = document.createElement('div');
-  btnContainer.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;';
+  btnContainer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
 
   const btnCancel = document.createElement('button');
   btnCancel.textContent = '取消';
-  btnCancel.style.cssText = 'padding:8px 20px;background:#999;color:white;border:none;border-radius:4px;cursor:pointer;';
+  btnCancel.className = 'btn btn-new';
 
   const btnOk = document.createElement('button');
   btnOk.textContent = '确定';
-  btnOk.style.cssText = 'padding:8px 20px;background:#d4916e;color:white;border:none;border-radius:4px;cursor:pointer;';
+  btnOk.className = 'btn btn-save';
 
   btnContainer.appendChild(btnCancel);
   btnContainer.appendChild(btnOk);
@@ -387,8 +425,12 @@ function showInputDialog(message, defaultValue, callback) {
   input.select();
 
   const close = (value) => {
-    document.body.removeChild(overlay);
-    callback(value);
+    overlay.style.animation = 'fadeOut 0.2s ease-in';
+    dialog.style.animation = 'slideDown 0.2s ease-in';
+    setTimeout(() => {
+      document.body.removeChild(overlay);
+      callback(value);
+    }, 180);
   };
 
   btnOk.onclick = () => close(input.value);
@@ -399,71 +441,30 @@ function showInputDialog(message, defaultValue, callback) {
   };
 }
 
-function showAlert(message, callback) {
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
-
-  const dialog = document.createElement('div');
-  dialog.style.cssText = 'background:white;padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.3);min-width:300px;max-width:500px;';
-
-  const message_div = document.createElement('div');
-  message_div.textContent = message;
-  message_div.style.cssText = 'margin-bottom:20px;font-size:14px;color:#333;line-height:1.5;';
-
-  const btnContainer = document.createElement('div');
-  btnContainer.style.cssText = 'display:flex;justify-content:flex-end;';
-
-  const btnOk = document.createElement('button');
-  btnOk.textContent = '确定';
-  btnOk.style.cssText = 'padding:8px 20px;background:#d4916e;color:white;border:none;border-radius:4px;cursor:pointer;';
-
-  btnContainer.appendChild(btnOk);
-
-  dialog.appendChild(message_div);
-  dialog.appendChild(btnContainer);
-  overlay.appendChild(dialog);
-  document.body.appendChild(overlay);
-
-  btnOk.focus();
-
-  const close = () => {
-    document.body.removeChild(overlay);
-    if (callback) callback();
-  };
-
-  btnOk.onclick = close;
-  overlay.onclick = (e) => {
-    if (e.target === overlay) close();
-  };
-  document.onkeydown = (e) => {
-    if (e.key === 'Enter' || e.key === 'Escape') {
-      close();
-      document.onkeydown = null;
-    }
-  };
-}
-
 function showConfirm(message, callback) {
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:10000;display:flex;align-items:center;justify-content:center;';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.4);backdrop-filter:blur(2px);z-index:10000;display:flex;align-items:center;justify-content:center;animation:fadeIn 0.2s ease-out;';
 
   const dialog = document.createElement('div');
-  dialog.style.cssText = 'background:white;padding:20px;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.3);min-width:300px;max-width:500px;';
+  dialog.style.cssText = 'background:white;padding:24px;border-radius:12px;box-shadow:var(--shadow-window);min-width:320px;max-width:400px;animation:slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);';
 
   const message_div = document.createElement('div');
   message_div.textContent = message;
-  message_div.style.cssText = 'margin-bottom:20px;font-size:14px;color:#333;line-height:1.5;';
+  message_div.style.cssText = 'margin-bottom:24px;font-size:14px;color:var(--text-main);line-height:1.6;font-weight:500;';
 
   const btnContainer = document.createElement('div');
-  btnContainer.style.cssText = 'display:flex;justify-content:flex-end;gap:10px;';
+  btnContainer.style.cssText = 'display:flex;justify-content:flex-end;gap:8px;';
 
   const btnCancel = document.createElement('button');
   btnCancel.textContent = '取消';
-  btnCancel.style.cssText = 'padding:8px 20px;background:#999;color:white;border:none;border-radius:4px;cursor:pointer;';
+  btnCancel.className = 'btn btn-new';
 
   const btnOk = document.createElement('button');
   btnOk.textContent = '确定';
-  btnOk.style.cssText = 'padding:8px 20px;background:#d4916e;color:white;border:none;border-radius:4px;cursor:pointer;';
+  btnOk.className = 'btn btn-delete';
+  btnOk.style.background = 'var(--error)';
+  btnOk.style.color = 'white';
+  btnOk.style.borderColor = 'var(--error)';
 
   btnContainer.appendChild(btnCancel);
   btnContainer.appendChild(btnOk);
@@ -476,20 +477,17 @@ function showConfirm(message, callback) {
   btnOk.focus();
 
   const close = (result) => {
-    document.body.removeChild(overlay);
-    document.onkeydown = null;
-    callback(result);
+    overlay.style.animation = 'fadeOut 0.2s ease-in';
+    dialog.style.animation = 'slideDown 0.2s ease-in';
+    setTimeout(() => {
+      document.body.removeChild(overlay);
+      callback(result);
+    }, 180);
   };
 
   btnOk.onclick = () => close(true);
   btnCancel.onclick = () => close(false);
-  overlay.onclick = (e) => {
-    if (e.target === overlay) close(false);
-  };
-  document.onkeydown = (e) => {
-    if (e.key === 'Enter') close(true);
-    if (e.key === 'Escape') close(false);
-  };
+  overlay.onclick = (e) => { if (e.target === overlay) close(false); };
 }
 
 function deleteCurrent() {

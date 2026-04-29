@@ -11,7 +11,7 @@
     <!-- Titlebar -->
     <div class="titlebar">
       <div class="app-title">
-        <div class="dot"></div>
+        <img src="../assets/icons/icon.png" class="app-icon" alt="Clave">
         <span class="title-text">Clave</span>
       </div>
       <div class="badge" id="status">配置已同步</div>
@@ -20,29 +20,30 @@
         <button class="win-btn" onclick="openFolder()">打开文件夹</button>
       </div>
       <div class="window-controls">
-        <button class="control-btn minimize-btn" onclick="minimizeWindow()">
-          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="0" y1="6" x2="12" y2="6" stroke="currentColor" stroke-width="1"/></svg>
+        <button class="control-btn minimize-btn" onclick="minimizeWindow()" title="最小化">
+          <svg width="10" height="10" viewBox="0 0 12 12"><rect x="1" y="5.5" width="10" height="1" fill="currentColor"/></svg>
         </button>
-        <button class="control-btn maximize-btn" onclick="maximizeWindow()">
-          <svg width="12" height="12" viewBox="0 0 12 12"><rect x="1" y="1" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1"/></svg>
+        <button class="control-btn maximize-btn" onclick="maximizeWindow()" title="最大化/还原">
+          <svg width="10" height="10" viewBox="0 0 12 12"><rect x="2" y="2" width="8" height="8" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
         </button>
-        <button class="control-btn close-btn" onclick="closeWindow()">
-          <svg width="12" height="12" viewBox="0 0 12 12"><line x1="1" y1="1" x2="11" y2="11" stroke="currentColor" stroke-width="1"/><line x1="11" y1="1" x2="1" y2="11" stroke="currentColor" stroke-width="1"/></svg>
+        <button class="control-btn close-btn" onclick="closeWindow()" title="关闭">
+          <svg width="10" height="10" viewBox="0 0 12 12"><path d="M2,2 L10,10 M10,2 L2,10" stroke="currentColor" stroke-width="1.2" fill="none"/></svg>
         </button>
       </div>
     </div>
+
+    <!-- Toast Container -->
+    <div id="toastContainer" class="toast-container"></div>
 
     <!-- Content -->
     <div class="content">
       <!-- Sidebar -->
       <div class="sidebar">
-        <div class="sidebar-title">配置列表</div>
-        <div class="sidebar-subtitle">快速切换与编辑</div>
-        <div class="sidebar-list" id="profileList"></div>
-        <div class="sidebar-footer">
-          <div class="footer-title">使用说明</div>
-          <div class="footer-body">选择一个配置，编辑内容后保存或激活。</div>
+        <div class="sidebar-header">
+          <div class="sidebar-title">配置列表</div>
+          <div class="sidebar-subtitle">快速切换与编辑</div>
         </div>
+        <div class="sidebar-list" id="profileList"></div>
       </div>
 
       <!-- Main -->
