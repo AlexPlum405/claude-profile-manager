@@ -29,6 +29,17 @@ function readText(filePath) {
 }
 
 function writeText(filePath, text) {
+  ensureFolder(path.dirname(filePath));
+
+  if (fs.existsSync(filePath)) {
+    try {
+      fs.accessSync(filePath, fs.constants.W_OK);
+    } catch (e) {
+      // 某些迁移/复制场景下文件可能是只读，尽量自动修复权限
+      try { fs.chmodSync(filePath, 0o600); } catch (chmodErr) {}
+    }
+  }
+
   fs.writeFileSync(filePath, text, 'utf-8');
 }
 
@@ -519,44 +530,50 @@ function activateCurrent() {
   const selected = ensureSelection();
   if (!selected) return;
 
-  syncJsonFromFields();
-  const jsonText = document.getElementById('profileJson').value;
-  const profileData = parseJson(jsonText);
+  try {
+    syncJsonFromFields();
+    const jsonText = document.getElementById('profileJson').value;
+    const profileData = parseJson(jsonText);
 
-  if (!profileData) {
-    showAlert('JSON 格式无效，请先修正。');
-    return;
-  }
-
-  // 验证必需字段
-  if (!profileData.env || !profileData.env.ANTHROPIC_BASE_URL || !profileData.env.ANTHROPIC_AUTH_TOKEN) {
-    showAlert('配置缺少必需字段：ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN');
-    return;
-  }
-
-  // 保存 profile 文件
-  writeText(profilePath(selected), jsonText);
-
-  // 合并到 settings.json
-  const existingSettings = parseJson(readText(activeSettingsPath)) || {};
-
-  const mergeKeys = ['env', 'model', 'effortLevel', 'includeCoAuthoredBy',
-                     'skipDangerousModePermissionPrompt', 'permissions',
-                     'enabledPlugins', 'extraKnownMarketplaces'];
-
-  mergeKeys.forEach(key => {
-    if (profileData[key] !== undefined) {
-      existingSettings[key] = profileData[key];
+    if (!profileData) {
+      showAlert('JSON 格式无效，请先修正。');
+      return;
     }
-  });
 
-  const mergedJson = JSON.stringify(existingSettings, null, 2);
-  writeText(activeSettingsPath, mergedJson);
-  writeText(activeProfilePath, selected);
+    // 验证必需字段
+    if (!profileData.env || !profileData.env.ANTHROPIC_BASE_URL || !profileData.env.ANTHROPIC_AUTH_TOKEN) {
+      showAlert('配置缺少必需字段：ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN');
+      return;
+    }
 
-  rebuildProfileList(selected);
-  syncStatus();
-  showAlert(`已启用 ${selected}`);
+    // 保存 profile 文件
+    writeText(profilePath(selected), jsonText);
+
+    // 合并到 settings.json
+    const existingSettings = parseJson(readText(activeSettingsPath)) || {};
+
+    const mergeKeys = ['env', 'model', 'effortLevel', 'includeCoAuthoredBy',
+                       'skipDangerousModePermissionPrompt', 'permissions',
+                       'enabledPlugins', 'extraKnownMarketplaces'];
+
+    mergeKeys.forEach(key => {
+      if (profileData[key] !== undefined) {
+        existingSettings[key] = profileData[key];
+      }
+    });
+
+    const mergedJson = JSON.stringify(existingSettings, null, 2);
+    writeText(activeSettingsPath, mergedJson);
+    writeText(activeProfilePath, selected);
+
+    rebuildProfileList(selected);
+    syncStatus();
+    showAlert(`已启用 ${selected}`);
+  } catch (err) {
+    console.error('activateCurrent failed:', err);
+    const msg = err && err.message ? err.message : String(err);
+    showAlert(`激活失败：${msg}`);
+  }
 }
 
 function refreshAll() {
@@ -764,4 +781,3 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('apiKey').addEventListener('keyup', syncJsonFromFields);
   document.getElementById('profileJson').addEventListener('keyup', syncFieldsFromJson);
 });
-

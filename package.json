@@ -7,7 +7,7 @@
     "start": "electron .",
     "build": "electron-builder",
     "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac",
+    "build:mac": "electron-builder --mac --arm64",
     "build:linux": "electron-builder --linux"
   },
   "keywords": ["claude", "switch", "profile", "electron"],
@@ -32,9 +32,20 @@
       "icon": "assets/icons/icon.ico"
     },
     "mac": {
-      "target": ["dmg", "zip"],
-      "icon": "assets/icons/icon.png",
-      "category": "public.app-category.developer-tools"
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        },
+        {
+          "target": "zip",
+          "arch": ["arm64"]
+        }
+      ],
+      "icon": "assets/icons/icon.icns",
+      "category": "public.app-category.developer-tools",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
     },
     "linux": {
       "target": ["AppImage", "deb"],

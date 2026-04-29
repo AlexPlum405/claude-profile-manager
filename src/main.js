@@ -34,17 +34,6 @@ function createWindow() {
 
   win.loadFile('src/index.html');
 
-  // 窗口控制 IPC
-  ipcMain.on('window-minimize', () => win.minimize());
-  ipcMain.on('window-maximize', () => {
-    if (win.isMaximized()) {
-      win.unmaximize();
-    } else {
-      win.maximize();
-    }
-  });
-  ipcMain.on('window-close', () => win.close());
-
   // 创建中文菜单
   const template = [
     {
@@ -114,6 +103,30 @@ function createWindow() {
   // 开发模式下打开开发者工具
   // win.webContents.openDevTools();
 }
+
+// 窗口控制 IPC（全局只注册一次，按事件来源定位窗口）
+ipcMain.on('window-minimize', (event) => {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  if (!target || target.isDestroyed()) return;
+  target.minimize();
+});
+
+ipcMain.on('window-maximize', (event) => {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  if (!target || target.isDestroyed()) return;
+
+  if (target.isMaximized()) {
+    target.unmaximize();
+  } else {
+    target.maximize();
+  }
+});
+
+ipcMain.on('window-close', (event) => {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  if (!target || target.isDestroyed()) return;
+  target.close();
+});
 
 app.whenReady().then(() => {
   createWindow();
