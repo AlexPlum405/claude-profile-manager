@@ -12,6 +12,94 @@ const activeProfilePath = path.join(claudeRoot, '.active-profile');
 let currentLoadedProfile = '';
 let selectedProfile = '';
 
+// API 格式定义
+const API_FORMATS = [
+  {
+    id: 'anthropic-native',
+    name: 'Anthropic 原生 API',
+    endpoint: '/v1/messages',
+    authHeader: 'x-api-key',
+    authPrefix: '',
+    additionalHeaders: { 'anthropic-version': '2023-06-01' },
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: ['anthropic.com', 'claude.ai']
+  },
+  {
+    id: 'openai-compatible',
+    name: 'OpenAI 兼容格式',
+    endpoint: '/v1/chat/completions',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    additionalHeaders: {},
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: ['sensenova.cn', 'deepseek.com', 'openai.com', 'api.openai.com', 'token.sensenova']
+  },
+  {
+    id: 'minimax-anthropic',
+    name: 'MiniMax Anthropic 兼容',
+    endpoint: '/v1/messages',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    additionalHeaders: { 'anthropic-version': '2023-06-01' },
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: ['minimax.chat']
+  },
+  {
+    id: 'volcengine-api',
+    name: '火山引擎 API',
+    endpoint: '/v1/chat/completions',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    additionalHeaders: {},
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: ['volcengine.com', 'ark.cn']
+  },
+  {
+    id: 'generic-messages',
+    name: '通用 /v1/messages 端点',
+    endpoint: '/v1/messages',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    additionalHeaders: {},
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: []
+  },
+  {
+    id: 'generic-completions',
+    name: '通用 /v1/chat/completions 端点',
+    endpoint: '/v1/chat/completions',
+    authHeader: 'Authorization',
+    authPrefix: 'Bearer ',
+    additionalHeaders: {},
+    requestBody: (model) => ({
+      model: model,
+      max_tokens: 10,
+      messages: [{ role: 'user', content: 'Hi' }]
+    }),
+    urlPatterns: []
+  }
+];
+
 // 工具函数
 function profilePath(name) {
   return path.join(claudeRoot, `settings.${name}.json`);
@@ -277,8 +365,27 @@ function rebuildProfileList(activeProfile) {
     metaSpan.className = 'item-meta';
     metaSpan.textContent = getProfileMeta(profile);
 
+    // 添加测试状态图标
+    const statusIcon = document.createElement('span');
+    statusIcon.className = 'profile-status-icon';
+
+    const config = parseJson(readText(profilePath(profile)));
+    if (config && config.apiFormat && config.apiFormat.testResult) {
+      if (config.apiFormat.testResult.success) {
+        // 测试成功时隐藏图标
+        statusIcon.style.display = 'none';
+      } else {
+        statusIcon.textContent = '❌';
+        statusIcon.title = '测试失败';
+      }
+    } else {
+      statusIcon.textContent = '⚠️';
+      statusIcon.title = '未测试';
+    }
+
     div.appendChild(nameSpan);
     div.appendChild(metaSpan);
+    div.appendChild(statusIcon);
 
     div.onclick = () => {
       selectedProfile = profile;
@@ -544,34 +651,53 @@ function activateCurrent() {
       return;
     }
 
-    // 保存 profile 文件
-    writeText(profilePath(selected), jsonText);
+    // 检查测试状态
+    if (!profileData.apiFormat || !profileData.apiFormat.testResult || !profileData.apiFormat.testResult.success) {
+      showConfirm(
+        '此配置未通过测试或测试失败。\n\n强制激活可能导致运行时错误。\n\n是否仍要激活？',
+        (confirmed) => {
+          if (confirmed) {
+            performActivation(selected, jsonText, profileData);
+          }
+        }
+      );
+      return;
+    }
 
-    // 合并到 settings.json
-    const existingSettings = parseJson(readText(activeSettingsPath)) || {};
+    // 测试通过，直接激活
+    performActivation(selected, jsonText, profileData);
 
-    const mergeKeys = ['env', 'model', 'effortLevel', 'includeCoAuthoredBy',
-                       'skipDangerousModePermissionPrompt', 'permissions',
-                       'enabledPlugins', 'extraKnownMarketplaces'];
-
-    mergeKeys.forEach(key => {
-      if (profileData[key] !== undefined) {
-        existingSettings[key] = profileData[key];
-      }
-    });
-
-    const mergedJson = JSON.stringify(existingSettings, null, 2);
-    writeText(activeSettingsPath, mergedJson);
-    writeText(activeProfilePath, selected);
-
-    rebuildProfileList(selected);
-    syncStatus();
-    showAlert(`已启用 ${selected}`);
   } catch (err) {
     console.error('activateCurrent failed:', err);
     const msg = err && err.message ? err.message : String(err);
     showAlert(`激活失败：${msg}`);
   }
+}
+
+function performActivation(selected, jsonText, profileData) {
+  // 保存 profile 文件
+  writeText(profilePath(selected), jsonText);
+
+  // 合并到 settings.json
+  const existingSettings = parseJson(readText(activeSettingsPath)) || {};
+
+  const mergeKeys = ['env', 'model', 'effortLevel', 'includeCoAuthoredBy',
+                     'skipDangerousModePermissionPrompt', 'permissions',
+                     'enabledPlugins', 'extraKnownMarketplaces', 'apiFormat'];
+
+  mergeKeys.forEach(key => {
+    if (profileData[key] !== undefined) {
+      existingSettings[key] = profileData[key];
+    }
+  });
+
+  const mergedJson = JSON.stringify(existingSettings, null, 2);
+  writeText(activeSettingsPath, mergedJson);
+  writeText(activeProfilePath, selected);
+
+  rebuildProfileList(selected);
+  syncStatus();
+  showAlert(`已启用 ${selected}`);
 }
 
 function refreshAll() {
@@ -644,16 +770,26 @@ function hideTestProgress() {
   if (overlay) document.body.removeChild(overlay);
 }
 
-function testCurrent() {
-  const baseUrl = document.getElementById('baseUrl').value.trim();
-  const apiKey = document.getElementById('apiKey').value.trim();
+// 新增：API 格式测试相关函数
 
-  if (!baseUrl || !apiKey) {
-    showAlert('请先填写基础地址和 API 密钥。');
-    return;
-  }
+function sortFormatsByUrl(formats, url) {
+  const urlLower = url.toLowerCase();
+  const matched = [];
+  const unmatched = [];
 
-  // 从 JSON 中读取模型名（如有）
+  formats.forEach(format => {
+    const hasMatch = format.urlPatterns.some(pattern => urlLower.includes(pattern.toLowerCase()));
+    if (hasMatch) {
+      matched.push(format);
+    } else {
+      unmatched.push(format);
+    }
+  });
+
+  return [...matched, ...unmatched];
+}
+
+function getModelFromConfig() {
   const parsed = parseJson(document.getElementById('profileJson').value);
   let model = 'claude-sonnet-4-6';
   if (parsed) {
@@ -665,82 +801,285 @@ function testCurrent() {
       if (aliasMap[alias]) model = aliasMap[alias];
     }
   }
+  return model;
+}
 
-  const TIMEOUT = 30;
-  showTestProgress(TIMEOUT);
-  document.getElementById('footerHint').innerText = '状态：正在测试连接...';
+function testApiFormat(baseUrl, apiKey, model, format) {
+  return new Promise((resolve) => {
+    const https = require('https');
+    const http = require('http');
+    const { URL } = require('url');
 
-  const url = baseUrl.replace(/\/$/, '') + '/v1/messages';
-  const https = require('https');
-  const http = require('http');
-  const { URL } = require('url');
+    // 处理已经包含端点的 Base URL
+    let finalUrl = baseUrl.replace(/\/$/, '');
 
-  const parsedUrl = new URL(url);
-  const client = parsedUrl.protocol === 'https:' ? https : http;
+    // 检查 Base URL 是否已经包含了 /v1/chat/completions 或 /v1/messages 等端点
+    const commonEndpoints = ['/v1/chat/completions', '/v1/messages', '/chat/completions', '/messages'];
+    const hasEndpoint = commonEndpoints.some(ep => finalUrl.endsWith(ep));
 
-  const postData = JSON.stringify({
-    model: model,
-    max_tokens: 10,
-    messages: [{ role: 'user', content: 'Hi' }]
+    if (!hasEndpoint) {
+      // 如果没有端点，则追加
+      finalUrl = finalUrl + format.endpoint;
+    }
+
+    const url = finalUrl;
+
+    try {
+      const parsedUrl = new URL(url);
+      const client = parsedUrl.protocol === 'https:' ? https : http;
+
+      const postData = JSON.stringify(format.requestBody(model));
+
+      const headers = {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(postData)
+      };
+
+      // 设置认证头
+      if (format.authPrefix) {
+        headers[format.authHeader] = format.authPrefix + apiKey;
+      } else {
+        headers[format.authHeader] = apiKey;
+      }
+
+      // 添加额外的请求头
+      Object.assign(headers, format.additionalHeaders);
+
+      const options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path: parsedUrl.pathname,
+        method: 'POST',
+        timeout: 30000,
+        headers: headers
+      };
+
+      const startTime = Date.now();
+
+      const req = client.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          const elapsed = Date.now() - startTime;
+          const success = res.statusCode === 200;
+          resolve({
+            success: success,
+            statusCode: res.statusCode,
+            elapsed: elapsed,
+            error: success ? null : data
+          });
+        });
+      });
+
+      req.on('error', (err) => {
+        const elapsed = Date.now() - startTime;
+        resolve({
+          success: false,
+          statusCode: 0,
+          elapsed: elapsed,
+          error: err.message
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy();
+        const elapsed = Date.now() - startTime;
+        resolve({
+          success: false,
+          statusCode: 0,
+          elapsed: elapsed,
+          error: '连接超时'
+        });
+      });
+
+      req.write(postData);
+      req.end();
+    } catch (err) {
+      resolve({
+        success: false,
+        statusCode: 0,
+        elapsed: 0,
+        error: err.message
+      });
+    }
+  });
+}
+
+function showEnhancedTestProgress(formats) {
+  const overlay = document.createElement('div');
+  overlay.id = 'test-overlay';
+  overlay.className = 'test-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'test-dialog';
+
+  const title = document.createElement('div');
+  title.className = 'test-title';
+  title.textContent = '正在测试 API 兼容性...';
+
+  const formatList = document.createElement('div');
+  formatList.className = 'test-format-list';
+  formatList.id = 'test-format-list';
+
+  formats.forEach(format => {
+    const item = document.createElement('div');
+    item.className = 'test-format-item';
+    item.dataset.formatId = format.id;
+
+    item.innerHTML = `
+      <span class="format-icon">⏳</span>
+      <span class="format-name">${format.name}</span>
+      <span class="format-status">等待中</span>
+    `;
+
+    formatList.appendChild(item);
   });
 
-  const options = {
-    hostname: parsedUrl.hostname,
-    port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-    path: parsedUrl.pathname,
-    method: 'POST',
-    timeout: TIMEOUT * 1000,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'Content-Length': Buffer.byteLength(postData)
+  dialog.appendChild(title);
+  dialog.appendChild(formatList);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+}
+
+function updateTestProgress(formatId, status, result = null) {
+  const item = document.querySelector(`[data-format-id="${formatId}"]`);
+  if (!item) return;
+
+  const icon = item.querySelector('.format-icon');
+  const statusEl = item.querySelector('.format-status');
+
+  item.classList.remove('testing', 'success', 'failed');
+
+  if (status === 'testing') {
+    item.classList.add('testing');
+    icon.textContent = '🔄';
+    icon.classList.add('spin');
+    statusEl.textContent = '测试中...';
+  } else if (status === 'success') {
+    item.classList.add('success');
+    icon.textContent = '✅';
+    icon.classList.remove('spin');
+    statusEl.textContent = `成功 (${result.elapsed}ms)`;
+  } else if (status === 'failed') {
+    item.classList.add('failed');
+    icon.textContent = '❌';
+    icon.classList.remove('spin');
+    statusEl.textContent = `失败 (${result.statusCode || '错误'})`;
+  }
+}
+
+function hideEnhancedTestProgress() {
+  const overlay = document.getElementById('test-overlay');
+  if (overlay) {
+    overlay.style.animation = 'fadeOut 0.2s ease-in';
+    setTimeout(() => {
+      if (document.body.contains(overlay)) {
+        document.body.removeChild(overlay);
+      }
+    }, 200);
+  }
+}
+
+function saveApiFormatToConfig(format, result) {
+  const jsonText = document.getElementById('profileJson').value;
+  const config = parseJson(jsonText) || {};
+
+  config.apiFormat = {
+    id: format.id,
+    name: format.name,
+    endpoint: format.endpoint,
+    authHeader: format.authHeader,
+    authPrefix: format.authPrefix,
+    testedAt: new Date().toISOString(),
+    testResult: {
+      success: result.success,
+      statusCode: result.statusCode,
+      elapsed: result.elapsed
     }
   };
 
-  const startTime = Date.now();
-  const restoreStatus = () => {
-    document.getElementById('footerHint').innerText = `状态：已激活 ${getActiveProfile() || 'unknown'}`;
-  };
+  const updatedJson = JSON.stringify(config, null, 2);
+  document.getElementById('profileJson').value = updatedJson;
+  syncFieldsFromJson();
 
-  const req = client.request(options, (res) => {
-    let data = '';
-    res.on('data', (chunk) => { data += chunk; });
-    res.on('end', () => {
-      hideTestProgress();
-      const elapsed = Date.now() - startTime;
-      if (res.statusCode === 200) {
-        restoreStatus();
-        showAlert(`连接成功！\n\n模型: ${model}\n响应时间: ${elapsed}ms\n状态码: ${res.statusCode}`);
+  // 保存到文件并刷新侧边栏
+  const selected = selectedProfile;
+  if (selected) {
+    saveProfileFile(selected, updatedJson);
+    rebuildProfileList(getActiveProfile());
+  }
+}
+
+function showTestFailureDialog(testResults) {
+  const failedCount = testResults.filter(r => !r.result.success).length;
+  const totalCount = testResults.length;
+
+  let message = `所有 ${totalCount} 种 API 格式测试均失败。\n\n`;
+  message += '测试结果：\n';
+
+  testResults.forEach(({ format, result }) => {
+    const status = result.success ? '✅' : '❌';
+    const detail = result.success ? `${result.elapsed}ms` : (result.error || `状态码 ${result.statusCode}`);
+    message += `${status} ${format.name}: ${detail}\n`;
+  });
+
+  message += '\n请检查：\n';
+  message += '• Base URL 是否正确\n';
+  message += '• API Key 是否有效\n';
+  message += '• 网络连接是否正常';
+
+  showAlert(message);
+}
+
+function testCurrent() {
+  const baseUrl = document.getElementById('baseUrl').value.trim();
+  const apiKey = document.getElementById('apiKey').value.trim();
+
+  if (!baseUrl || !apiKey) {
+    showAlert('请先填写基础地址和 API 密钥。');
+    return;
+  }
+
+  const model = getModelFromConfig();
+  const sortedFormats = sortFormatsByUrl(API_FORMATS, baseUrl);
+
+  showEnhancedTestProgress(sortedFormats);
+  document.getElementById('footerHint').innerText = '状态：正在测试连接...';
+
+  // 异步顺序测试
+  (async () => {
+    let successFormat = null;
+    const testResults = [];
+
+    for (const format of sortedFormats) {
+      updateTestProgress(format.id, 'testing');
+      const result = await testApiFormat(baseUrl, apiKey, model, format);
+      testResults.push({ format, result });
+
+      if (result.success) {
+        successFormat = format;
+        updateTestProgress(format.id, 'success', result);
+        break;
       } else {
-        let errMsg = `状态码: ${res.statusCode}`;
-        try {
-          const errBody = JSON.parse(data);
-          if (errBody.error && errBody.error.message) {
-            errMsg += `\n错误: ${errBody.error.message}`;
-          }
-        } catch (e) {}
-        restoreStatus();
-        showAlert(`连接失败\n\n模型: ${model}\n${errMsg}\n响应时间: ${elapsed}ms`);
+        updateTestProgress(format.id, 'failed', result);
       }
-    });
-  });
+    }
 
-  req.on('error', (err) => {
-    hideTestProgress();
-    restoreStatus();
-    showAlert(`连接失败\n\n错误: ${err.message}`);
-  });
+    // 延迟 1 秒后关闭对话框，让用户看到最终结果
+    setTimeout(() => {
+      hideEnhancedTestProgress();
 
-  req.on('timeout', () => {
-    req.destroy();
-    hideTestProgress();
-    restoreStatus();
-    showAlert(`连接超时（${TIMEOUT}秒）`);
-  });
+      if (successFormat) {
+        const successResult = testResults.find(r => r.format === successFormat).result;
+        saveApiFormatToConfig(successFormat, successResult);
+        showAlert(`连接成功！\n\n格式: ${successFormat.name}\n响应时间: ${successResult.elapsed}ms`);
+      } else {
+        showTestFailureDialog(testResults);
+      }
 
-  req.write(postData);
-  req.end();
+      document.getElementById('footerHint').innerText = `状态：已激活 ${getActiveProfile() || 'unknown'}`;
+    }, 1000);
+  })();
 }
 
 // 窗口控制函数

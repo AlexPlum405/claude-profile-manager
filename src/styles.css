@@ -299,3 +299,123 @@ body {
   gap: 12px;
 }
 .toast.hide { animation: fadeOut 0.4s forwards; }
+
+/* ── 测试对话框样式 ── */
+.test-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.test-dialog {
+  background: white;
+  padding: 32px;
+  border-radius: 16px;
+  box-shadow: var(--shadow-window);
+  min-width: 480px;
+  max-width: 600px;
+  animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.test-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-bottom: 24px;
+  text-align: center;
+}
+
+.test-format-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.test-format-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-input);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  transition: var(--transition-fast);
+}
+
+.test-format-item.testing {
+  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.05);
+}
+
+.test-format-item.success {
+  border-color: var(--success);
+  background: rgba(16, 185, 129, 0.05);
+}
+
+.test-format-item.failed {
+  border-color: var(--error);
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.format-icon {
+  font-size: 20px;
+  width: 24px;
+  text-align: center;
+  display: inline-block;
+}
+
+.format-icon.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.format-name {
+  flex: 1;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-main);
+}
+
+.format-status {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-family: 'IBM Plex Mono', monospace;
+  min-width: 100px;
+  text-align: right;
+}
+
+/* ── 配置状态图标 ── */
+.profile-status-icon {
+  font-size: 14px;
+  margin-left: auto;
+  opacity: 0.6;
+  transition: var(--transition-fast);
+}
+
+.sidebar-item:hover .profile-status-icon {
+  opacity: 1;
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes slideDown {
+  from { transform: translateY(0); opacity: 1; }
+  to { transform: translateY(30px); opacity: 0; }
+}
