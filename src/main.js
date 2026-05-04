@@ -1,8 +1,10 @@
 const { app, BrowserWindow, Menu, ipcMain } = require('electron');
 const path = require('path');
 
-// 禁用硬件加速（减少启动时间）
-app.disableHardwareAcceleration();
+// Aero UI relies on large translucent layers; keep GPU acceleration on by default.
+if (process.env.CLAVE_DISABLE_HW_ACCELERATION === '1') {
+  app.disableHardwareAcceleration();
+}
 
 // 单实例锁（防止多开）
 const gotTheLock = app.requestSingleInstanceLock();
@@ -18,6 +20,8 @@ function createWindow() {
     transparent: true,
     hasShadow: true,
     resizable: true,
+    minWidth: 900,
+    minHeight: 640,
     show: false, // 先隐藏，加载完再显示
     webPreferences: {
       nodeIntegration: true,
