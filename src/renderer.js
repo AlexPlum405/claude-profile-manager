@@ -1812,6 +1812,62 @@ function setupProfileDropImport() {
   });
 }
 
+function setProfileMoreMenuOpen(open) {
+  const menu = document.getElementById('profileMoreMenu');
+  const button = document.getElementById('profileMoreButton');
+  if (!menu || !button) return;
+
+  menu.classList.toggle('hidden', !open);
+  button.setAttribute('aria-expanded', open ? 'true' : 'false');
+
+  if (open) {
+    const firstItem = menu.querySelector('button');
+    if (firstItem) setTimeout(() => firstItem.focus(), 0);
+  }
+}
+
+function closeProfileMoreMenu() {
+  setProfileMoreMenuOpen(false);
+}
+
+function toggleProfileMoreMenu(event) {
+  if (event) event.stopPropagation();
+
+  const menu = document.getElementById('profileMoreMenu');
+  if (!menu) return;
+
+  setProfileMoreMenuOpen(menu.classList.contains('hidden'));
+}
+
+function handleMoreMenuAction(action) {
+  closeProfileMoreMenu();
+  if (typeof action !== 'function') return;
+
+  try {
+    const result = action();
+    if (result && typeof result.catch === 'function') {
+      result.catch(err => {
+        console.error('profile more menu action failed:', err);
+        showAlert(`操作失败：${err.message || String(err)}`);
+      });
+    }
+  } catch (err) {
+    console.error('profile more menu action failed:', err);
+    showAlert(`操作失败：${err.message || String(err)}`);
+  }
+}
+
+function setupProfileMoreMenu() {
+  document.addEventListener('click', (event) => {
+    const shell = document.querySelector('.more-menu-shell');
+    if (shell && !shell.contains(event.target)) closeProfileMoreMenu();
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') closeProfileMoreMenu();
+  });
+}
+
 ipcRenderer.on('menu-import-profiles', () => importProfiles());
 ipcRenderer.on('menu-export-current-profile', () => exportCurrentProfile());
 ipcRenderer.on('menu-export-all-profiles', () => exportAllProfiles());
@@ -2316,6 +2372,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
   syncStatus();
   setupProfileDropImport();
+  setupProfileMoreMenu();
 
   // 搜索逻辑
   const searchInput = document.getElementById('profileSearch');

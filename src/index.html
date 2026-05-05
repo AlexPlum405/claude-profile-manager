@@ -44,10 +44,6 @@
       <!-- Sidebar Nav -->
       <nav class="profile-nav">
         <div class="nav-section-title">我的配置集合</div>
-        <div class="nav-toolbar">
-          <button class="btn-action btn-secondary btn-small" onclick="importProfiles()" title="导入 JSON 或 ZIP 配置">导入</button>
-          <button class="btn-action btn-secondary btn-small" onclick="exportAllProfiles()" title="批量导出所有配置为 ZIP">导出全部</button>
-        </div>
         <div class="nav-list" id="profileList">
           <!-- Profiles injected by renderer.js -->
         </div>
@@ -78,11 +74,19 @@
             <input id="profileTitle" class="editable-title" type="text" placeholder="未命名配置" readonly />
           </div>
           <div class="editor-actions">
-            <button class="btn-action btn-secondary" onclick="exportCurrentProfile()">导出</button>
-            <button class="btn-action btn-secondary" onclick="deleteCurrent()">删除</button>
             <button class="btn-action btn-secondary" onclick="saveCurrent()">保存</button>
             <button id="testBtn" class="btn-action btn-secondary" onclick="testCurrent()">测试连接</button>
             <button class="btn-action btn-primary" onclick="activateCurrent()">立即激活</button>
+            <div class="more-menu-shell">
+              <button id="profileMoreButton" class="btn-action btn-more" type="button" onclick="toggleProfileMoreMenu(event)" aria-label="更多配置操作" aria-haspopup="menu" aria-expanded="false" title="更多">···</button>
+              <div id="profileMoreMenu" class="profile-more-menu hidden" role="menu" aria-label="更多配置操作">
+                <button type="button" role="menuitem" onclick="handleMoreMenuAction(importProfiles)">导入配置<span>⌘O</span></button>
+                <button type="button" role="menuitem" onclick="handleMoreMenuAction(exportCurrentProfile)">导出当前<span>⌘E</span></button>
+                <button type="button" role="menuitem" onclick="handleMoreMenuAction(exportAllProfiles)">批量导出<span>⇧⌘E</span></button>
+                <div class="menu-separator" role="separator"></div>
+                <button class="danger" type="button" role="menuitem" onclick="handleMoreMenuAction(deleteCurrent)">删除配置</button>
+              </div>
+            </div>
           </div>
         </header>
 
