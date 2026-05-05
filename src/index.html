@@ -18,10 +18,10 @@
     <!-- Title Bar / Command Bar -->
     <header class="command-bar">
       <div class="brand-zone">
-        <div class="traffic-lights">
-          <div class="dot red"></div>
-          <div class="dot yellow"></div>
-          <div class="dot green"></div>
+        <div class="traffic-lights" aria-label="窗口控制">
+          <button class="dot red" type="button" onclick="closeWindow()" aria-label="关闭窗口" title="关闭"></button>
+          <button class="dot yellow" type="button" onclick="minimizeWindow()" aria-label="最小化窗口" title="最小化"></button>
+          <button class="dot green" type="button" onclick="maximizeWindow()" aria-label="最大化或还原窗口" title="最大化/还原"></button>
         </div>
         <span class="brand-name">Clave Pro</span>
       </div>
