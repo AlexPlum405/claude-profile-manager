@@ -52,5 +52,8 @@
       "icon": "assets/icons/icon.png",
       "category": "Development"
     }
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
   }
 }

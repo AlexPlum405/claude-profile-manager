@@ -8,3 +8,16 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+
+# Local design drafts, generated icon boards, and throwaway verification files
+_temp/
+brand-spec.md
+brand-spec.json
+product-facts.md
+docs/brand-spec.md
+assets/icons/icon-clave-key-1024.png
+assets/icons/icon-clave-profile-relay-1024.png
+
+# Local API smoke-test scripts may contain private endpoints or tokens
+test_auth*.js
+test_url.js

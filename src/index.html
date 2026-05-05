@@ -44,6 +44,10 @@
       <!-- Sidebar Nav -->
       <nav class="profile-nav">
         <div class="nav-section-title">我的配置集合</div>
+        <div class="nav-toolbar">
+          <button class="btn-action btn-secondary btn-small" onclick="importProfiles()" title="导入 JSON 或 ZIP 配置">导入</button>
+          <button class="btn-action btn-secondary btn-small" onclick="exportAllProfiles()" title="批量导出所有配置为 ZIP">导出全部</button>
+        </div>
         <div class="nav-list" id="profileList">
           <!-- Profiles injected by renderer.js -->
         </div>
@@ -74,6 +78,7 @@
             <input id="profileTitle" class="editable-title" type="text" placeholder="未命名配置" readonly />
           </div>
           <div class="editor-actions">
+            <button class="btn-action btn-secondary" onclick="exportCurrentProfile()">导出</button>
             <button class="btn-action btn-secondary" onclick="deleteCurrent()">删除</button>
             <button class="btn-action btn-secondary" onclick="saveCurrent()">保存</button>
             <button id="testBtn" class="btn-action btn-secondary" onclick="testCurrent()">测试连接</button>
@@ -144,6 +149,13 @@
   <div id="toast">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
     <span id="toastMessage">配置已成功激活</span>
+  </div>
+
+  <div id="dropOverlay" class="drop-overlay hidden">
+    <div class="drop-card">
+      <div class="drop-title">释放以导入配置</div>
+      <div class="drop-subtitle">支持多个 settings.*.json 文件或 Clave ZIP 包</div>
+    </div>
   </div>
 
   <script src="renderer.js"></script>

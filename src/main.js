@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog } = require('electron');
 const path = require('path');
 
 // Aero UI relies on large translucent layers; keep GPU acceleration on by default.
@@ -43,6 +43,22 @@ function createWindow() {
     {
       label: '文件',
       submenu: [
+        {
+          label: '导入配置...',
+          accelerator: 'CmdOrCtrl+O',
+          click: () => { win.webContents.send('menu-import-profiles'); }
+        },
+        {
+          label: '导出当前配置...',
+          accelerator: 'CmdOrCtrl+E',
+          click: () => { win.webContents.send('menu-export-current-profile'); }
+        },
+        {
+          label: '批量导出 ZIP...',
+          accelerator: 'Shift+CmdOrCtrl+E',
+          click: () => { win.webContents.send('menu-export-all-profiles'); }
+        },
+        { type: 'separator' },
         {
           label: '刷新',
           accelerator: 'CmdOrCtrl+R',
@@ -93,7 +109,7 @@ function createWindow() {
               type: 'info',
               title: '关于 Clave',
               message: 'Clave',
-              detail: '版本: 1.0.0\n\nClaude Code 配置快速切换工具\n\n© 2026'
+              detail: `版本: ${app.getVersion()}\n\nClaude Code 配置快速切换工具\n\n© 2026`
             });
           }
         }
@@ -130,6 +146,49 @@ ipcMain.on('window-close', (event) => {
   const target = BrowserWindow.fromWebContents(event.sender);
   if (!target || target.isDestroyed()) return;
   target.close();
+});
+
+function windowFromEvent(event) {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  return target && !target.isDestroyed() ? target : null;
+}
+
+ipcMain.handle('profiles-open-import-dialog', async (event) => {
+  const target = windowFromEvent(event);
+  const options = {
+    title: '导入 Clave 配置',
+    defaultPath: app.getPath('downloads'),
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Clave profiles', extensions: ['json', 'zip'] },
+      { name: 'JSON', extensions: ['json'] },
+      { name: 'ZIP', extensions: ['zip'] }
+    ]
+  };
+  const result = target
+    ? await dialog.showOpenDialog(target, options)
+    : await dialog.showOpenDialog(options);
+
+  return result.canceled ? [] : result.filePaths;
+});
+
+ipcMain.handle('profiles-save-export-dialog', async (event, options = {}) => {
+  const target = windowFromEvent(event);
+  const dialogOptions = {
+    title: options.title || '导出 Clave 配置',
+    defaultPath: options.defaultPath || path.join(app.getPath('downloads'), 'clave-profiles.zip'),
+    filters: Array.isArray(options.filters) && options.filters.length > 0
+      ? options.filters
+      : [
+          { name: 'ZIP', extensions: ['zip'] },
+          { name: 'JSON', extensions: ['json'] }
+        ]
+  };
+  const result = target
+    ? await dialog.showSaveDialog(target, dialogOptions)
+    : await dialog.showSaveDialog(dialogOptions);
+
+  return result.canceled ? '' : result.filePath;
 });
 
 app.whenReady().then(() => {

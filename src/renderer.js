@@ -2,12 +2,15 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { shell, ipcRenderer } = require('electron');
+const JSZip = require('jszip');
+const appPackage = require('../package.json');
 
 // 路径配置
 const homeDir = os.homedir();
 const claudeRoot = path.join(homeDir, '.claude');
 const activeSettingsPath = path.join(claudeRoot, 'settings.json');
 const activeProfilePath = path.join(claudeRoot, '.active-profile');
+const EXPORT_MANIFEST_FILE = 'clave-profiles-manifest.json';
 
 let currentLoadedProfile = '';
 let selectedProfile = '';
@@ -1388,6 +1391,431 @@ function openFolder() {
   shell.openPath(claudeRoot);
 }
 
+function timestampForFile() {
+  return new Date().toISOString().replace(/[:.]/g, '-').replace('T', '-').slice(0, 19);
+}
+
+function ensureFileExtension(filePath, extension) {
+  if (!filePath) return '';
+  const normalizedExtension = extension.startsWith('.') ? extension : `.${extension}`;
+  return path.extname(filePath) ? filePath : `${filePath}${normalizedExtension}`;
+}
+
+function getProfileFileName(profileName) {
+  return `settings.${profileName}.json`;
+}
+
+function buildProfileManifest(profiles) {
+  return {
+    app: 'Clave',
+    version: appPackage.version || 'unknown',
+    exportedAt: new Date().toISOString(),
+    profileCount: profiles.length,
+    profiles: profiles.map(profile => ({
+      name: profile.name,
+      file: `profiles/${getProfileFileName(profile.name)}`
+    }))
+  };
+}
+
+function getProfileRecordForExport(profileName, options = {}) {
+  if (!profileName || !fileExists(profilePath(profileName))) {
+    throw new Error(`配置 ${profileName || 'unknown'} 不存在。`);
+  }
+
+  let jsonText = readProfileText(profileName);
+  if (options.preferEditor && profileName === selectedProfile) {
+    syncJsonFromFields({ normalizeBaseUrl: true });
+    const parsed = validateJsonEditor();
+    if (!parsed) {
+      throw new Error('当前编辑器 JSON 无效，无法导出。');
+    }
+    jsonText = JSON.stringify(parsed, null, 2);
+  }
+
+  return { name: profileName, jsonText };
+}
+
+async function createProfilesZip(profiles) {
+  const zip = new JSZip();
+  const manifest = buildProfileManifest(profiles);
+  zip.file(EXPORT_MANIFEST_FILE, JSON.stringify(manifest, null, 2));
+
+  profiles.forEach(profile => {
+    const manifestEntry = manifest.profiles.find(item => item.name === profile.name);
+    zip.file(manifestEntry.file, profile.jsonText);
+  });
+
+  return zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 }
+  });
+}
+
+async function exportProfilesToPath(profileNames, targetPath, options = {}) {
+  const profiles = profileNames.map(name => getProfileRecordForExport(name, options));
+  const extension = path.extname(targetPath).toLowerCase();
+
+  if (profiles.length === 1 && extension === '.json') {
+    fs.writeFileSync(targetPath, profiles[0].jsonText, 'utf-8');
+    return { kind: 'json', count: 1, targetPath };
+  }
+
+  const zipPath = ensureFileExtension(targetPath, 'zip');
+  const zipBuffer = await createProfilesZip(profiles);
+  fs.writeFileSync(zipPath, zipBuffer);
+  return { kind: 'zip', count: profiles.length, targetPath: zipPath };
+}
+
+async function exportCurrentProfile() {
+  const selected = ensureSelection();
+  if (!selected) return;
+
+  try {
+    const defaultPath = path.join(homeDir, 'Downloads', `${getProfileFileName(selected)}`);
+    const chosenPath = await ipcRenderer.invoke('profiles-save-export-dialog', {
+      title: `导出配置：${selected}`,
+      defaultPath,
+      filters: [
+        { name: 'JSON', extensions: ['json'] },
+        { name: 'ZIP', extensions: ['zip'] }
+      ]
+    });
+    if (!chosenPath) return;
+
+    const targetPath = path.extname(chosenPath)
+      ? chosenPath
+      : ensureFileExtension(chosenPath, 'json');
+    const result = await exportProfilesToPath([selected], targetPath, { preferEditor: true });
+    showAlert(`已导出 ${result.count} 个配置到 ${path.basename(result.targetPath)}`);
+  } catch (err) {
+    console.error('exportCurrentProfile failed:', err);
+    showAlert(`导出失败：${err.message || String(err)}`);
+  }
+}
+
+async function exportAllProfiles() {
+  const profiles = scanProfiles({ force: true });
+  if (profiles.length === 0) {
+    showAlert('没有可导出的配置。');
+    return;
+  }
+
+  try {
+    const defaultPath = path.join(homeDir, 'Downloads', `clave-profiles-${timestampForFile()}.zip`);
+    const chosenPath = await ipcRenderer.invoke('profiles-save-export-dialog', {
+      title: `批量导出 ${profiles.length} 个配置`,
+      defaultPath,
+      filters: [{ name: 'ZIP', extensions: ['zip'] }]
+    });
+    if (!chosenPath) return;
+
+    const result = await exportProfilesToPath(profiles, ensureFileExtension(chosenPath, 'zip'));
+    showAlert(`已导出 ${result.count} 个配置到 ${path.basename(result.targetPath)}`);
+  } catch (err) {
+    console.error('exportAllProfiles failed:', err);
+    showAlert(`导出失败：${err.message || String(err)}`);
+  }
+}
+
+function profileNameFromJsonFile(filePath) {
+  const baseName = path.basename(filePath, path.extname(filePath));
+  const match = baseName.match(/^settings\.(.+)$/i);
+  return match ? match[1] : baseName;
+}
+
+function profileNameFromZipEntry(entryName) {
+  const fileName = entryName.split('/').filter(Boolean).pop() || '';
+  const baseName = fileName.replace(/\.json$/i, '');
+  const match = baseName.match(/^settings\.(.+)$/i);
+  return match ? match[1] : baseName;
+}
+
+function normalizeImportedProfileName(name, fallback = 'imported-profile') {
+  let normalized = String(name || '').trim();
+  normalized = normalized.replace(/\.json$/i, '').replace(/^settings\./i, '');
+  normalized = normalized.replace(/[/:*?"<>|\\]/g, '-');
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  if (!normalized || RESERVED_PROFILE_NAMES.has(normalized.toLowerCase())) {
+    normalized = fallback;
+  }
+  if (normalized.length > 80) {
+    normalized = normalized.slice(0, 80).trim();
+  }
+  return normalized || fallback;
+}
+
+function uniqueImportedProfileName(baseName, usedNames) {
+  const base = normalizeImportedProfileName(baseName);
+  let candidate = base;
+  if (!usedNames.has(candidate) && !fileExists(profilePath(candidate))) {
+    usedNames.add(candidate);
+    return candidate;
+  }
+
+  const suffixBase = base.length > 64 ? base.slice(0, 64).trim() : base;
+  candidate = normalizeImportedProfileName(`${suffixBase}-imported`);
+  let index = 2;
+  while (usedNames.has(candidate) || fileExists(profilePath(candidate))) {
+    candidate = normalizeImportedProfileName(`${suffixBase}-imported-${index}`);
+    index += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function normalizeImportedProfileRecord(record, usedNames) {
+  const parsed = parseJson(record.jsonText);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {
+      skipped: true,
+      source: record.source,
+      reason: 'JSON 无效或不是配置对象'
+    };
+  }
+
+  const name = uniqueImportedProfileName(record.name, usedNames);
+  return {
+    name,
+    originalName: record.name,
+    source: record.source,
+    jsonText: JSON.stringify(parsed, null, 2)
+  };
+}
+
+async function readProfilesFromJsonFile(filePath) {
+  if (path.basename(filePath) === EXPORT_MANIFEST_FILE) {
+    return [];
+  }
+
+  return [{
+    name: profileNameFromJsonFile(filePath),
+    source: path.basename(filePath),
+    jsonText: fs.readFileSync(filePath, 'utf-8')
+  }];
+}
+
+async function readProfilesFromZipFile(filePath) {
+  const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
+  const records = [];
+  const manifestFile = zip.file(EXPORT_MANIFEST_FILE);
+
+  if (manifestFile) {
+    const manifest = parseJson(await manifestFile.async('string'));
+    if (manifest && Array.isArray(manifest.profiles)) {
+      for (const profile of manifest.profiles) {
+        if (!profile || !profile.file) continue;
+        const entry = zip.file(profile.file);
+        if (!entry) continue;
+        records.push({
+          name: profile.name || profileNameFromZipEntry(profile.file),
+          source: `${path.basename(filePath)}:${profile.file}`,
+          jsonText: await entry.async('string')
+        });
+      }
+    }
+  }
+
+  if (records.length > 0) return records;
+
+  const jsonEntries = Object.values(zip.files)
+    .filter(entry => !entry.dir && /\.json$/i.test(entry.name) && entry.name !== EXPORT_MANIFEST_FILE);
+
+  for (const entry of jsonEntries) {
+    records.push({
+      name: profileNameFromZipEntry(entry.name),
+      source: `${path.basename(filePath)}:${entry.name}`,
+      jsonText: await entry.async('string')
+    });
+  }
+
+  return records;
+}
+
+async function readImportFile(filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.json') {
+    return readProfilesFromJsonFile(filePath);
+  }
+  if (extension === '.zip') {
+    return readProfilesFromZipFile(filePath);
+  }
+  return [];
+}
+
+function showImportResultDialog(imported, skipped) {
+  if (skipped.length === 0 && imported.length <= 1) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'dialog-card wide';
+
+  const title = document.createElement('div');
+  title.className = 'dialog-message';
+  title.textContent = `导入完成：${imported.length} 个成功，${skipped.length} 个跳过`;
+
+  const list = document.createElement('div');
+  list.className = 'import-result-list';
+
+  imported.slice(0, 30).forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'import-result-row';
+    const name = document.createElement('strong');
+    name.textContent = item.name;
+    const source = document.createElement('span');
+    source.textContent = item.source;
+    row.appendChild(name);
+    row.appendChild(source);
+    list.appendChild(row);
+  });
+
+  skipped.slice(0, 30).forEach(item => {
+    const row = document.createElement('div');
+    row.className = 'import-result-row import-result-error';
+    const source = document.createElement('strong');
+    source.textContent = item.source;
+    const reason = document.createElement('span');
+    reason.textContent = item.reason;
+    row.appendChild(source);
+    row.appendChild(reason);
+    list.appendChild(row);
+  });
+
+  const actions = document.createElement('div');
+  actions.className = 'dialog-actions';
+  const ok = document.createElement('button');
+  ok.className = 'btn-action btn-primary';
+  ok.textContent = '完成';
+  actions.appendChild(ok);
+
+  dialog.appendChild(title);
+  dialog.appendChild(list);
+  dialog.appendChild(actions);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  const close = () => {
+    if (document.body.contains(overlay)) document.body.removeChild(overlay);
+  };
+  ok.onclick = close;
+  overlay.onclick = (event) => { if (event.target === overlay) close(); };
+  ok.focus();
+}
+
+async function importProfileFiles(filePaths) {
+  const uniquePaths = [...new Set((filePaths || []).filter(Boolean))];
+  if (uniquePaths.length === 0) return;
+
+  const usedNames = new Set();
+  const imported = [];
+  const skipped = [];
+
+  try {
+    ensureFolder(claudeRoot);
+
+    for (const filePath of uniquePaths) {
+      try {
+        const records = await readImportFile(filePath);
+        if (records.length === 0) {
+          skipped.push({ source: path.basename(filePath), reason: '不支持的文件类型或空 ZIP' });
+          continue;
+        }
+
+        records.forEach(record => {
+          const normalized = normalizeImportedProfileRecord(record, usedNames);
+          if (normalized.skipped) {
+            skipped.push(normalized);
+            return;
+          }
+
+          saveProfileFile(normalized.name, normalized.jsonText);
+          imported.push(normalized);
+        });
+      } catch (err) {
+        skipped.push({ source: path.basename(filePath), reason: err.message || String(err) });
+      }
+    }
+
+    if (imported.length > 0) {
+      invalidateProfileCache();
+      selectedProfile = imported[0].name;
+      rebuildProfileList(getActiveProfile(true));
+      selectProfileItem(selectedProfile);
+      loadSelectedProfile(selectedProfile);
+    }
+
+    showAlert(`导入完成：${imported.length} 个成功，${skipped.length} 个跳过`);
+    showImportResultDialog(imported, skipped);
+  } catch (err) {
+    console.error('importProfileFiles failed:', err);
+    showAlert(`导入失败：${err.message || String(err)}`);
+  }
+}
+
+async function importProfiles() {
+  try {
+    const filePaths = await ipcRenderer.invoke('profiles-open-import-dialog');
+    await importProfileFiles(filePaths);
+  } catch (err) {
+    console.error('importProfiles failed:', err);
+    showAlert(`导入失败：${err.message || String(err)}`);
+  }
+}
+
+function dataTransferHasFiles(dataTransfer) {
+  if (!dataTransfer) return false;
+  return Array.from(dataTransfer.types || []).includes('Files');
+}
+
+function setDropOverlayVisible(visible) {
+  const overlay = document.getElementById('dropOverlay');
+  if (!overlay) return;
+  overlay.classList.toggle('hidden', !visible);
+}
+
+function setupProfileDropImport() {
+  let dragDepth = 0;
+
+  window.addEventListener('dragenter', (event) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth += 1;
+    setDropOverlayVisible(true);
+  });
+
+  window.addEventListener('dragover', (event) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  });
+
+  window.addEventListener('dragleave', (event) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) setDropOverlayVisible(false);
+  });
+
+  window.addEventListener('drop', async (event) => {
+    if (!dataTransferHasFiles(event.dataTransfer)) return;
+    event.preventDefault();
+    dragDepth = 0;
+    setDropOverlayVisible(false);
+
+    const filePaths = Array.from(event.dataTransfer.files || [])
+      .map(file => file.path)
+      .filter(Boolean);
+    await importProfileFiles(filePaths);
+  });
+}
+
+ipcRenderer.on('menu-import-profiles', () => importProfiles());
+ipcRenderer.on('menu-export-current-profile', () => exportCurrentProfile());
+ipcRenderer.on('menu-export-all-profiles', () => exportAllProfiles());
+
 // 测试配置连通性
 let testTimer = null;
 
@@ -1887,6 +2315,7 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   syncStatus();
+  setupProfileDropImport();
 
   // 搜索逻辑
   const searchInput = document.getElementById('profileSearch');

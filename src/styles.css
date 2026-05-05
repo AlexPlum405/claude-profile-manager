@@ -183,6 +183,15 @@ body {
   display: flex; flex-direction: column;
 }
 .nav-section-title { padding: 24px 20px 12px; font-size: 11px; font-weight: 700; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase; }
+.nav-toolbar {
+  display: flex;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+.nav-toolbar .btn-action {
+  flex: 1 1 0;
+  min-width: 0;
+}
 .nav-list { flex: 1; overflow-y: auto; padding: 0 12px; }
 
 .sidebar-item {
@@ -391,6 +400,43 @@ body {
   color: var(--accent);
   font-weight: 700;
 }
+.import-result-list {
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+}
+.import-result-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  align-items: center;
+  background: rgba(255,255,255,0.72);
+  border: 0.5px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  min-width: 0;
+}
+.import-result-row strong {
+  font-size: 12px;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.import-result-row span {
+  font: 11px/1.45 'SF Mono', monospace;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.import-result-error {
+  border-color: rgba(255, 95, 86, 0.28);
+  background: rgba(255, 95, 86, 0.05);
+}
+.import-result-error strong,
+.import-result-error span {
+  color: var(--error);
+}
 
 .json-editor-shell {
   position: relative;
@@ -488,6 +534,39 @@ body {
   z-index: 2000; transition: transform 0.5s var(--ease), opacity 0.5s var(--ease); opacity: 0; pointer-events: none;
 }
 #toast.visible { transform: translateX(-50%) translateY(0); opacity: 1; }
+
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 15000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(245, 245, 247, 0.72);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  pointer-events: none;
+}
+.drop-card {
+  width: min(420px, calc(100vw - 80px));
+  padding: 32px;
+  border-radius: var(--radius-lg);
+  border: 1px dashed var(--accent);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 24px 70px rgba(0,0,0,0.12);
+  text-align: center;
+}
+.drop-title {
+  color: var(--text-main);
+  font-size: 18px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+.drop-subtitle {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
 
 .hidden { display: none !important; }
 ::-webkit-scrollbar { width: 4px; }
