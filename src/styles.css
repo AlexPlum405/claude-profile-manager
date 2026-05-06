@@ -8,20 +8,29 @@
   --success: #27C93F;
   --error: #FF5F56;
   --warning: #FFBD2E;
-  
+
   --bg-app: #F5F5F7;
   --bg-glass: rgba(255, 255, 255, 0.75);
   --bg-sidebar: rgba(255, 255, 255, 0.3);
   --border-color: rgba(0, 0, 0, 0.08);
-  
+
   --text-main: #1D1D1F;
   --text-muted: #86868B;
-  
+
+  --font-sans: -apple-system, "SF Pro Display", "PingFang SC", sans-serif;
+  --font-mono: "SF Mono", "Geist Mono", monospace;
+
   --radius-lg: 18px;
   --radius-md: 12px;
   --radius-sm: 8px;
   --radius-full: 9999px;
-  
+
+  --window-blur: 24px;
+  --panel-blur: 24px;
+  --overlay-blur: 14px;
+  --window-shadow: 0 40px 100px rgba(0,0,0,0.05);
+  --surface-shadow: 0 18px 48px rgba(0,0,0,0.14);
+
   --ease: cubic-bezier(0.16, 1, 0.3, 1);
   --trans-base: 180ms var(--ease);
 }
@@ -50,7 +59,7 @@
 body {
   background: var(--bg-app);
   color: var(--text-main);
-  font-family: -apple-system, "SF Pro Display", "PingFang SC", sans-serif;
+  font-family: var(--font-sans);
   height: 100vh;
   display: flex;
   align-items: center;
@@ -87,10 +96,10 @@ body {
 .window {
   width: 100vw; height: 100vh;
   background: var(--bg-glass);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(var(--window-blur));
+  -webkit-backdrop-filter: blur(var(--window-blur));
   border: 1px solid rgba(255, 255, 255, 0.8);
-  box-shadow: 0 40px 100px rgba(0,0,0,0.05);
+  box-shadow: var(--window-shadow);
   display: flex; flex-direction: column;
   position: relative; contain: layout paint;
 }
@@ -200,7 +209,7 @@ body {
 }
 
 .item-name { font-size: 13px; font-weight: 600; color: var(--text-main); }
-.item-meta { font-family: 'SF Mono', 'Geist Mono', monospace; font-size: 9px; color: var(--text-muted); }
+.item-meta { font-family: var(--font-mono); font-size: 9px; color: var(--text-muted); }
 
 /* Sidebar Footer */
 .nav-footer {
@@ -216,7 +225,7 @@ body {
 .btn-icon:active { transform: scale(0.96); }
 
 /* --- Editor --- */
-.editor-area { flex: 1; display: flex; flex-direction: column; background: white; position: relative; overflow: hidden; }
+.editor-area { flex: 1; display: flex; flex-direction: column; background: var(--bg-editor, white); position: relative; overflow: hidden; }
 
 #testProgressBar {
   position: absolute; top: 0; left: 0; height: 2px;
@@ -267,7 +276,7 @@ body {
 }
 .input-field {
   width: 100%; background: var(--bg-app); border: 1px solid transparent;
-  padding: 14px 18px; border-radius: var(--radius-sm); font-family: 'SF Mono', monospace;
+  padding: 14px 18px; border-radius: var(--radius-sm); font-family: var(--font-mono);
   font-size: 13px; outline: none; transition: background-color 120ms, border-color 120ms;
 }
 .input-field:focus { border-color: var(--accent); background: white; }
@@ -277,7 +286,7 @@ body {
   position: fixed;
   inset: 0;
   background: rgba(29, 29, 31, 0.28);
-  backdrop-filter: blur(14px);
+  backdrop-filter: blur(var(--overlay-blur));
   z-index: 10000;
   display: flex;
   align-items: center;
@@ -377,7 +386,7 @@ body {
 }
 .diagnostic-value,
 .preview-value {
-  font: 11px/1.45 'SF Mono', monospace;
+  font: 11px/1.45 var(--font-mono);
   color: var(--text-main);
   word-break: break-all;
 }
@@ -417,7 +426,7 @@ body {
   white-space: nowrap;
 }
 .import-result-row span {
-  font: 11px/1.45 'SF Mono', monospace;
+  font: 11px/1.45 var(--font-mono);
   color: var(--text-muted);
   word-break: break-all;
 }
@@ -437,7 +446,7 @@ body {
 
 .json-textarea {
   width: 100%; min-height: 350px; background: #FAFAFA; border-radius: var(--radius-md);
-  border: 0.5px solid var(--border-color); padding: 20px; font-family: 'SF Mono', monospace;
+  border: 0.5px solid var(--border-color); padding: 20px; font-family: var(--font-mono);
   font-size: 12px; line-height: 1.6; resize: none; outline: none;
   display: block;
 }
@@ -461,7 +470,7 @@ body {
   background: var(--accent-soft);
   border: 1px solid var(--accent);
   border-radius: 4px;
-  font-family: 'SF Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.6;
   font-weight: 700;
@@ -546,9 +555,9 @@ body {
   border: 0.5px solid var(--border-color);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.94);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  box-shadow: 0 18px 48px rgba(0,0,0,0.14);
+  backdrop-filter: blur(var(--panel-blur));
+  -webkit-backdrop-filter: blur(var(--panel-blur));
+  box-shadow: var(--surface-shadow);
   z-index: 3000;
 }
 .profile-more-menu button {
@@ -569,7 +578,7 @@ body {
   text-align: left;
 }
 .profile-more-menu button span {
-  font: 10px/1 'SF Mono', monospace;
+  font: 10px/1 var(--font-mono);
   color: var(--text-muted);
 }
 .profile-more-menu button:hover,
@@ -623,8 +632,8 @@ body {
   align-items: center;
   justify-content: center;
   background: rgba(245, 245, 247, 0.72);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(var(--overlay-blur));
+  -webkit-backdrop-filter: blur(var(--overlay-blur));
   pointer-events: none;
 }
 .drop-card {

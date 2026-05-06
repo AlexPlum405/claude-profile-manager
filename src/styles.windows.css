@@ -1,0 +1,197 @@
+html[data-platform="win32"] {
+  --bg-app: transparent;
+  --bg-glass: rgba(250, 250, 252, 0.82);
+  --bg-sidebar: rgba(255, 255, 255, 0.58);
+  --border-color: rgba(27, 31, 35, 0.12);
+  --text-main: #1f2328;
+  --text-muted: rgba(31, 35, 40, 0.64);
+
+  --font-sans: "Inter", "Source Han Sans CN", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  --window-blur: 14px;
+  --panel-blur: 18px;
+  --overlay-blur: 12px;
+  --window-shadow: 0 18px 48px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
+  --surface-shadow: 0 10px 28px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+html[data-platform="win32"],
+html[data-platform="win32"] body {
+  background: transparent;
+}
+
+html[data-platform="win32"] body {
+  /* Windows 字体渲染优化：Inter 需要 optimizeLegibility 才能正确显示连字和字距 */
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "liga" 1, "calt" 1, "kern" 1;
+}
+
+html[data-platform="win32"] .window {
+  border-radius: 16px;
+  overflow: hidden;
+  background: linear-gradient(180deg, rgba(252, 252, 253, 0.86), rgba(247, 248, 250, 0.82));
+  backdrop-filter: blur(var(--window-blur)) saturate(140%);
+  -webkit-backdrop-filter: blur(var(--window-blur)) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.48);
+  box-shadow: var(--window-shadow), inset 0 1px 0 rgba(255, 255, 255, 0.22);
+}
+
+html[data-platform="win32"] .brand-name {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+html[data-platform="win32"] .editable-title {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: -0.025em;
+}
+
+/* Display 字体用于标题、标签等需要强调的元素 */
+html[data-platform="win32"] .nav-section-title,
+html[data-platform="win32"] .status-badge,
+html[data-platform="win32"] .input-group-label,
+html[data-platform="win32"] .drop-title {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 700;
+}
+
+/* Body 字体用于正文、按钮、输入框等常规元素 */
+html[data-platform="win32"] .btn-action,
+html[data-platform="win32"] .btn-icon,
+html[data-platform="win32"] .search-container input,
+html[data-platform="win32"] .input-field,
+html[data-platform="win32"] .dialog-message,
+html[data-platform="win32"] .item-name,
+html[data-platform="win32"] .drop-subtitle {
+  font-family: var(--font-sans);
+  font-style: normal;
+}
+
+html[data-platform="win32"] .item-meta,
+html[data-platform="win32"] .input-hint,
+html[data-platform="win32"] .panel-subtitle,
+html[data-platform="win32"] .profile-status,
+html[data-platform="win32"] .status-footer,
+html[data-platform="win32"] .diagnostic-value,
+html[data-platform="win32"] .preview-value,
+html[data-platform="win32"] .import-result-row span,
+html[data-platform="win32"] .profile-more-menu button span {
+  font-family: var(--font-sans);
+  font-style: normal;
+}
+
+/* 等宽字体用于 JSON 编辑器 */
+html[data-platform="win32"] .json-textarea {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+  font-feature-settings: "liga" 1, "calt" 1, "zero" 1;
+}
+
+/* 侧边栏域名使用等宽字体 */
+html[data-platform="win32"] .profile-url {
+  font-family: var(--font-mono) !important;
+  font-size: 10px !important;
+}
+
+html[data-platform="win32"] .input-hint,
+html[data-platform="win32"] .panel-subtitle,
+html[data-platform="win32"] .status-footer,
+html[data-platform="win32"] .profile-status,
+html[data-platform="win32"] .item-meta {
+  color: rgba(31, 35, 40, 0.7);
+}
+
+html[data-platform="win32"] .item-meta,
+html[data-platform="win32"] .profile-status {
+  font-size: 10px;
+}
+
+html[data-platform="win32"] .command-bar,
+html[data-platform="win32"] .profile-nav,
+html[data-platform="win32"] .editor-header,
+html[data-platform="win32"] .nav-footer,
+html[data-platform="win32"] .status-footer {
+  border-color: rgba(27, 31, 35, 0.09);
+}
+
+html[data-platform="win32"] .profile-nav,
+html[data-platform="win32"] .editor-area {
+  background: transparent;
+}
+
+html[data-platform="win32"] .search-container,
+html[data-platform="win32"] .btn-secondary,
+html[data-platform="win32"] .btn-more,
+html[data-platform="win32"] .input-field,
+html[data-platform="win32"] .json-textarea,
+html[data-platform="win32"] .input-card,
+html[data-platform="win32"] .json-panel,
+html[data-platform="win32"] .diagnostic-panel,
+html[data-platform="win32"] .diagnostic-item,
+html[data-platform="win32"] .preview-row,
+html[data-platform="win32"] .import-result-row {
+  border-color: rgba(27, 31, 35, 0.10);
+}
+
+html[data-platform="win32"] .search-container,
+html[data-platform="win32"] .btn-secondary,
+html[data-platform="win32"] .btn-more,
+html[data-platform="win32"] .input-field,
+html[data-platform="win32"] .json-textarea {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+html[data-platform="win32"] .input-card,
+html[data-platform="win32"] .json-panel,
+html[data-platform="win32"] .diagnostic-panel {
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+html[data-platform="win32"] .sidebar-item.selected {
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.08);
+}
+
+html[data-platform="win32"] .btn-primary {
+  box-shadow: 0 8px 18px rgba(0, 122, 255, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+
+html[data-platform="win32"] .profile-more-menu,
+html[data-platform="win32"] .dialog-card,
+html[data-platform="win32"] .drop-card {
+  backdrop-filter: blur(var(--panel-blur)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--panel-blur)) saturate(130%);
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  box-shadow: var(--surface-shadow);
+}
+
+html[data-platform="win32"] .dialog-overlay,
+html[data-platform="win32"] .drop-overlay {
+  backdrop-filter: blur(var(--overlay-blur));
+  -webkit-backdrop-filter: blur(var(--overlay-blur));
+}
+
+html[data-platform="win32"] .drop-card,
+html[data-platform="win32"] .dialog-card,
+html[data-platform="win32"] .profile-more-menu,
+html[data-platform="win32"] .search-container,
+html[data-platform="win32"] .input-card,
+html[data-platform="win32"] .json-panel,
+html[data-platform="win32"] .diagnostic-panel,
+html[data-platform="win32"] .btn-action {
+  border-radius: var(--radius-md);
+}

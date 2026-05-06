@@ -13,16 +13,20 @@ if (!gotTheLock) {
 }
 
 function createWindow() {
+  const isWindows = process.platform === 'win32';
   const win = new BrowserWindow({
     width: 900,
     height: 700,
     frame: false,
-    transparent: true,
+    transparent: !isWindows,
+    roundedCorners: true,
+    thickFrame: isWindows,
     hasShadow: true,
     resizable: true,
     minWidth: 900,
     minHeight: 640,
     show: false, // 先隐藏，加载完再显示
+    backgroundColor: isWindows ? '#F5F5F7' : undefined,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -31,12 +35,27 @@ function createWindow() {
     icon: path.join(__dirname, '../assets/icons/icon.png')
   });
 
+  if (isWindows && typeof win.setBackgroundMaterial === 'function') {
+    try {
+      win.setBackgroundMaterial('mica');
+    } catch {
+      win.setBackgroundMaterial('auto');
+    }
+  }
+
   // 加载完成后显示窗口（避免白屏闪烁）
   win.once('ready-to-show', () => {
     win.show();
   });
 
   win.loadFile('src/index.html');
+
+  // 页面加载完成后注入平台信息
+  win.webContents.on('did-finish-load', () => {
+    win.webContents.executeJavaScript(`
+      document.documentElement.setAttribute('data-platform', '${process.platform}');
+    `);
+  });
 
   // 创建中文菜单
   const template = [

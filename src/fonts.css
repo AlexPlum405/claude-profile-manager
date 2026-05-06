@@ -1,0 +1,68 @@
+/* Local Font Declarations - 本地字体声明 */
+
+/* Inter - 现代 UI 字体（最接近 SF Pro 的开源字体） */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../assets/fonts/Inter/InterVariable.ttf') format('truetype-variations');
+}
+
+@font-face {
+  font-family: 'Inter';
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('../assets/fonts/Inter/InterVariable-Italic.ttf') format('truetype-variations');
+}
+
+/* JetBrains Mono - 等宽代码字体 */
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/JetBrainsMono/fonts/ttf/JetBrainsMono-Regular.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/JetBrainsMono/fonts/ttf/JetBrainsMono-Medium.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/JetBrainsMono/fonts/ttf/JetBrainsMono-Bold.ttf') format('truetype');
+}
+
+/* Source Han Sans CN - 思源黑体（中文） */
+@font-face {
+  font-family: 'Source Han Sans CN';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('../assets/fonts/SourceHanSansCN/SubsetOTF/CN/SourceHanSansCN-Regular.otf') format('opentype');
+}
+
+@font-face {
+  font-family: 'Source Han Sans CN';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('../assets/fonts/SourceHanSansCN/SubsetOTF/CN/SourceHanSansCN-Medium.otf') format('opentype');
+}
+
+@font-face {
+  font-family: 'Source Han Sans CN';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('../assets/fonts/SourceHanSansCN/SubsetOTF/CN/SourceHanSansCN-Bold.otf') format('opentype');
+}
