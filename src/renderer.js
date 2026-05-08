@@ -1,16 +1,29 @@
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { shell, ipcRenderer } = require('electron');
-const JSZip = require('jszip');
-const appPackage = require('../package.json');
+const claveBridge = window.claveApi;
+if (!claveBridge) {
+  throw new Error('Clave 安全桥未加载，应用无法访问本地配置。');
+}
+const {
+  fs,
+  path,
+  shell,
+  ipcRenderer,
+  imports: importApi,
+  exports: exportApi,
+  history: historyApi,
+  clipboard,
+  runtime,
+  net,
+  appPackage
+} = claveBridge;
 
 // 路径配置
-const homeDir = os.homedir();
-const claudeRoot = path.join(homeDir, '.claude');
-const activeSettingsPath = path.join(claudeRoot, 'settings.json');
-const activeProfilePath = path.join(claudeRoot, '.active-profile');
+const homeDir = claveBridge.paths.homeDir;
+const claudeRoot = claveBridge.paths.claudeRoot;
+const activeSettingsPath = claveBridge.paths.activeSettingsPath;
+const activeProfilePath = claveBridge.paths.activeProfilePath;
 const EXPORT_MANIFEST_FILE = 'clave-profiles-manifest.json';
+const PROFILE_ORDER_STORAGE_KEY = 'clave-profile-order-v1';
+const MODEL_HISTORY_STORAGE_KEY = 'clave-model-history-v1';
 
 let currentLoadedProfile = '';
 let selectedProfile = '';
@@ -21,6 +34,10 @@ let pendingThemeFrame = null;
 let pendingApiTestToken = 0;
 let currentTheme = '';
 let activeJsonBracketMatch = null;
+let draggingProfileName = '';
+let cachedAvailableModels = [];
+let pendingModelListToken = 0;
+let lastDiagnostics = null;
 
 const profileTextCache = new Map();
 const profileMetaCache = new Map();
@@ -37,6 +54,106 @@ const CLAUDE_CODE_MODEL_ALIASES = new Set([
 const INVALID_PROFILE_NAME_CHARS = /[/:*?"<>|\\]/;
 const RESERVED_PROFILE_NAMES = new Set(['json', '.', '..']);
 
+const PROVIDER_TEMPLATES = [
+  {
+    id: 'custom',
+    name: '自定义服务',
+    description: '保留当前配置，只使用手动填写的地址和模型。',
+    baseUrl: '',
+    endpointMode: 'auto',
+    formatId: '',
+    defaultModel: '',
+    knownModels: [],
+    hostPatterns: []
+  },
+  {
+    id: 'mimo',
+    name: 'Mimo / 小米 Mimo',
+    description: 'Mimo 的 Anthropic 兼容网关通常可对话，但不开放模型列表。',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    endpointMode: 'auto',
+    formatId: 'anthropic-native',
+    defaultModel: 'mimo-v2.5-pro',
+    knownModels: ['mimo-v2.5-pro'],
+    hostPatterns: ['xiaomimimo.com']
+  },
+  {
+    id: 'minimax',
+    name: 'MiniMax',
+    description: 'MiniMax Anthropic 兼容接口。',
+    baseUrl: 'https://api.minimax.chat/anthropic',
+    endpointMode: 'auto',
+    formatId: 'minimax-anthropic',
+    defaultModel: 'MiniMax-M2.7',
+    knownModels: ['MiniMax-M2.7'],
+    hostPatterns: ['minimax.chat']
+  },
+  {
+    id: 'volcengine',
+    name: '火山引擎 Ark',
+    description: 'OpenAI 兼容 chat/completions 线路。',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    endpointMode: 'openai',
+    formatId: 'volcengine-api',
+    defaultModel: '',
+    knownModels: [],
+    hostPatterns: ['volces.com', 'ark.cn']
+  },
+  {
+    id: 'sensenova',
+    name: '商汤日日新',
+    description: '商汤 OpenAI 兼容线路。',
+    baseUrl: 'https://token.sensenova.cn/v1/llm/chat-completions',
+    endpointMode: 'direct',
+    formatId: 'openai-compatible',
+    defaultModel: '',
+    knownModels: [],
+    hostPatterns: ['sensenova.cn']
+  },
+  {
+    id: 'openai-compatible',
+    name: 'OpenAI 兼容',
+    description: '通用 /v1/chat/completions 服务。',
+    baseUrl: 'https://api.openai.com',
+    endpointMode: 'openai',
+    formatId: 'openai-compatible',
+    defaultModel: '',
+    knownModels: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini'],
+    hostPatterns: ['openai.com', 'deepseek.com']
+  },
+  {
+    id: 'anthropic',
+    name: 'Anthropic 原生',
+    description: '官方 Anthropic /v1/messages 服务。',
+    baseUrl: 'https://api.anthropic.com',
+    endpointMode: 'anthropic',
+    formatId: 'anthropic-native',
+    defaultModel: 'claude-sonnet-4-6',
+    knownModels: ['claude-sonnet-4-6', 'claude-opus-4-7', 'claude-haiku-4-5'],
+    hostPatterns: ['anthropic.com', 'claude.ai']
+  },
+  {
+    id: 'iflytek',
+    name: '讯飞星火',
+    description: '常见完整端点模式，建议使用直连。',
+    baseUrl: '',
+    endpointMode: 'direct',
+    formatId: 'openai-compatible',
+    defaultModel: '',
+    knownModels: [],
+    hostPatterns: ['iflytek.com']
+  }
+];
+
+const SCENARIO_PRESETS = [
+  { id: '', name: '未标记', description: '不绑定使用场景。' },
+  { id: 'daily-coding', name: '日常编码', description: '稳定、通用，适合默认开发。' },
+  { id: 'deep-reasoning', name: '深度推理', description: '更强推理，适合复杂架构和长任务。' },
+  { id: 'fast-cheap', name: '便宜快速', description: '低成本快速响应。' },
+  { id: 'backup-route', name: '备用线路', description: '主线路异常时切换。' },
+  { id: 'cn-route', name: '国内线路', description: '国内网络环境优先。' }
+];
+
 // API 格式定义
 const API_FORMATS = [
   {
@@ -51,7 +168,7 @@ const API_FORMATS = [
       max_tokens: 10,
       messages: [{ role: 'user', content: 'Hi' }]
     }),
-    urlPatterns: ['anthropic.com', 'claude.ai']
+    urlPatterns: ['anthropic.com', 'claude.ai', 'xiaomimimo.com']
   },
   {
     id: 'openai-compatible',
@@ -137,8 +254,13 @@ function ensureFolder(folderPath) {
 }
 
 function readText(filePath) {
-  if (!fs.existsSync(filePath)) return '';
-  return fs.readFileSync(filePath, 'utf-8');
+  try {
+    if (!fs.existsSync(filePath)) return '';
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch (err) {
+    console.warn('readText failed:', err);
+    return '';
+  }
 }
 
 function writeText(filePath, text) {
@@ -158,6 +280,104 @@ function writeText(filePath, text) {
 
 function fileExists(filePath) {
   return fs.existsSync(filePath);
+}
+
+function byProfileName(a, b) {
+  return a.localeCompare(b, 'zh-Hans-CN', { sensitivity: 'base' });
+}
+
+function readProfileOrder() {
+  try {
+    const raw = localStorage.getItem(PROFILE_ORDER_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const unique = new Set();
+    return parsed.filter((item) => {
+      if (typeof item !== 'string' || !item) return false;
+      if (unique.has(item)) return false;
+      unique.add(item);
+      return true;
+    });
+  } catch (err) {
+    console.warn('readProfileOrder failed:', err);
+    return [];
+  }
+}
+
+function writeProfileOrder(order) {
+  const unique = new Set();
+  const normalized = (Array.isArray(order) ? order : []).filter((item) => {
+    if (typeof item !== 'string' || !item) return false;
+    if (unique.has(item)) return false;
+    unique.add(item);
+    return true;
+  });
+  try {
+    localStorage.setItem(PROFILE_ORDER_STORAGE_KEY, JSON.stringify(normalized));
+  } catch (err) {
+    console.warn('writeProfileOrder failed:', err);
+  }
+}
+
+function clearProfileOrder() {
+  try {
+    localStorage.removeItem(PROFILE_ORDER_STORAGE_KEY);
+  } catch (err) {
+    console.warn('clearProfileOrder failed:', err);
+  }
+}
+
+function reconcileProfileOrder(profiles) {
+  const order = readProfileOrder();
+  const profileSet = new Set(profiles);
+  const existing = order.filter(name => profileSet.has(name));
+  const missing = profiles.filter(name => !existing.includes(name));
+  const merged = [...existing, ...missing];
+
+  if (merged.length !== order.length || merged.some((name, index) => order[index] !== name)) {
+    writeProfileOrder(merged);
+  }
+  return merged;
+}
+
+function replaceProfileInStoredOrder(previousName, nextName) {
+  if (!previousName || !nextName || previousName === nextName) return;
+  const order = readProfileOrder();
+  const index = order.indexOf(previousName);
+  if (index >= 0) {
+    order[index] = nextName;
+    writeProfileOrder(order);
+  }
+}
+
+function moveProfileOrder(draggedProfile, targetProfile) {
+  if (!draggedProfile || !targetProfile || draggedProfile === targetProfile) return false;
+  const order = scanProfiles();
+  const fromIndex = order.indexOf(draggedProfile);
+  const toIndex = order.indexOf(targetProfile);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return false;
+
+  const nextOrder = order.slice();
+  const [moved] = nextOrder.splice(fromIndex, 1);
+  nextOrder.splice(toIndex, 0, moved);
+  writeProfileOrder(nextOrder);
+  cachedProfiles = nextOrder.slice();
+  return true;
+}
+
+function isProfileReorderAllowed() {
+  const searchInput = document.getElementById('profileSearch');
+  return !searchInput || !searchInput.value.trim();
+}
+
+function clearDragState() {
+  draggingProfileName = '';
+  const items = document.querySelectorAll('.sidebar-item');
+  items.forEach(item => {
+    item.classList.remove('dragging');
+    item.classList.remove('drag-over');
+  });
 }
 
 function invalidateProfileCache(profileName) {
@@ -203,9 +423,98 @@ function scanProfiles(options = {}) {
     }
   });
 
-  results.sort();
-  cachedProfiles = results;
-  return results.slice();
+  const alphabeticalProfiles = results.sort(byProfileName);
+  const orderedProfiles = reconcileProfileOrder(alphabeticalProfiles);
+  cachedProfiles = orderedProfiles;
+  return orderedProfiles.slice();
+}
+
+// ── JSON 编辑器（contenteditable <pre>）统一访问层 ─────────────
+function getJsonEditorValue() {
+  const el = document.getElementById('profileJson');
+  if (!el) return '';
+  return el.innerText || el.textContent || '';
+}
+
+function getJsonEditorCaret() {
+  const el = document.getElementById('profileJson');
+  if (!el) return 0;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return 0;
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer)) return 0;
+  const pre = range.cloneRange();
+  pre.selectNodeContents(el);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return pre.toString().length;
+}
+
+function getJsonEditorSelectionCount() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return 0;
+  return sel.getRangeAt(0).toString().length;
+}
+
+function setJsonEditorCaret(offset) {
+  const el = document.getElementById('profileJson');
+  if (!el) return;
+  const sel = window.getSelection();
+  if (!sel) return;
+  let remaining = offset;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+  let node;
+  while ((node = walker.nextNode())) {
+    const len = node.nodeValue.length;
+    if (remaining <= len) {
+      const range = document.createRange();
+      range.setStart(node, Math.max(0, remaining));
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return;
+    }
+    remaining -= len;
+  }
+  // 超出末尾 → 放到最后
+  const range = document.createRange();
+  range.selectNodeContents(el);
+  range.collapse(false);
+  sel.removeAllRanges();
+  sel.addRange(range);
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+function renderJsonEditorContent(text, activeIndex = -1, matchIndex = -1) {
+  const el = document.getElementById('profileJson');
+  if (!el) return;
+  if (activeIndex < 0 || matchIndex < 0) {
+    el.textContent = text;
+    return;
+  }
+  const first = Math.min(activeIndex, matchIndex);
+  const second = Math.max(activeIndex, matchIndex);
+  const a = escapeHtml(text.slice(0, first));
+  const b = escapeHtml(text[first] || '');
+  const c = escapeHtml(text.slice(first + 1, second));
+  const d = escapeHtml(text[second] || '');
+  const e = escapeHtml(text.slice(second + 1));
+  const anchorClass = first === activeIndex ? ' bracket-anchor' : '';
+  const matchClass = second === activeIndex ? ' bracket-anchor' : '';
+  el.innerHTML =
+    a +
+    `<span class="bracket-active${anchorClass}">${b}</span>` +
+    c +
+    `<span class="bracket-active${matchClass}">${d}</span>` +
+    e;
+}
+
+function setJsonEditorValue(text) {
+  const el = document.getElementById('profileJson');
+  if (!el) return;
+  el.textContent = text;
 }
 
 function parseJson(text) {
@@ -290,8 +599,449 @@ function getProviderModelFromConfig(config) {
   return '';
 }
 
-function normalizeClaudeCodeBaseUrl(baseUrl) {
+function getTemplateById(id) {
+  return PROVIDER_TEMPLATES.find(template => template.id === id) || PROVIDER_TEMPLATES[0];
+}
+
+function getFormatById(id) {
+  return API_FORMATS.find(format => format.id === id) || null;
+}
+
+function hostFromUrl(baseUrl = '') {
+  try {
+    return new URL(String(baseUrl || '').trim()).hostname.toLowerCase();
+  } catch (error) {
+    return '';
+  }
+}
+
+function detectProviderTemplate(configOrUrl = '') {
+  const baseUrl = typeof configOrUrl === 'string'
+    ? configOrUrl
+    : (configOrUrl && configOrUrl.env && configOrUrl.env.ANTHROPIC_BASE_URL) || '';
+  const configTemplate = typeof configOrUrl === 'object'
+    && configOrUrl
+    && configOrUrl.apiFormat
+    && configOrUrl.apiFormat.providerTemplate;
+  if (configTemplate) return getTemplateById(configTemplate);
+
+  const host = hostFromUrl(baseUrl);
+  if (!host) return PROVIDER_TEMPLATES[0];
+  return PROVIDER_TEMPLATES.find(template =>
+    template.id !== 'custom'
+    && template.hostPatterns.some(pattern => host.includes(pattern))
+  ) || PROVIDER_TEMPLATES[0];
+}
+
+function modelHistoryKey(baseUrl = '') {
+  return hostFromUrl(baseUrl) || 'custom';
+}
+
+function readModelHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MODEL_HISTORY_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function writeModelHistory(history) {
+  try {
+    localStorage.setItem(MODEL_HISTORY_STORAGE_KEY, JSON.stringify(history || {}));
+  } catch (error) {
+    console.warn('writeModelHistory failed:', error);
+  }
+}
+
+function rememberModelForProvider(baseUrl, modelId) {
+  const model = String(modelId || '').trim();
+  if (!model) return;
+  const key = modelHistoryKey(baseUrl);
+  const history = readModelHistory();
+  const list = Array.isArray(history[key]) ? history[key] : [];
+  history[key] = [model, ...list.filter(item => item !== model)].slice(0, 12);
+  writeModelHistory(history);
+}
+
+function collectModelsFromProfiles(baseUrl = '') {
+  const host = hostFromUrl(baseUrl);
+  if (!host) return [];
+  const found = [];
+  scanProfiles({ force: true }).forEach(profile => {
+    const parsed = parseJson(readProfileText(profile));
+    if (!parsed || !parsed.env || hostFromUrl(parsed.env.ANTHROPIC_BASE_URL) !== host) return;
+    const model = getProviderModelFromConfig(parsed) || (parsed.env && parsed.env.ANTHROPIC_MODEL) || parsed.model || '';
+    if (model) found.push(String(model).trim());
+  });
+  return found;
+}
+
+function modelRecordsFromIds(ids = [], source = '已知') {
+  const seen = new Set();
+  return ids
+    .map(id => String(id || '').trim())
+    .filter(id => {
+      if (!id || seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    })
+    .map(id => ({ id, owned_by: source }));
+}
+
+function getFallbackModelRecords(config = parseJson(getJsonEditorValue()) || {}) {
+  const baseUrl = config && config.env ? config.env.ANTHROPIC_BASE_URL : document.getElementById('baseUrl')?.value || '';
+  const template = detectProviderTemplate(config || baseUrl);
+  const current = getProviderModelFromConfig(config);
+  const history = readModelHistory()[modelHistoryKey(baseUrl)] || [];
+  const profileModels = collectModelsFromProfiles(baseUrl);
+  return modelRecordsFromIds([
+    current,
+    ...(template.knownModels || []),
+    ...(history || []),
+    ...profileModels
+  ], template.id === 'custom' ? '历史' : template.name);
+}
+
+function formatDateTime(value) {
+  if (!value) return '无记录';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('zh-CN', { hour12: false });
+}
+
+function daysSince(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return Infinity;
+  return (Date.now() - date.getTime()) / (24 * 60 * 60 * 1000);
+}
+
+function buildHealthReport(config, profileName = selectedProfile, activeProfile = getActiveProfile()) {
+  const checks = [];
+  let score = 100;
+  const env = (config && config.env) || {};
+  const apiFormat = (config && config.apiFormat) || {};
+  const providerModel = getProviderModelFromConfig(config);
+
+  const push = (key, label, status, detail, penalty = 0) => {
+    checks.push({ key, label, status, detail });
+    if (status === 'bad' || status === 'warn') score -= penalty;
+  };
+
+  push(
+    'baseUrl',
+    'Base URL',
+    env.ANTHROPIC_BASE_URL ? 'ok' : 'bad',
+    env.ANTHROPIC_BASE_URL || '未填写',
+    25
+  );
+  push(
+    'token',
+    '认证令牌',
+    env.ANTHROPIC_AUTH_TOKEN ? 'ok' : 'bad',
+    env.ANTHROPIC_AUTH_TOKEN ? redactSecret(env.ANTHROPIC_AUTH_TOKEN) : '未填写',
+    25
+  );
+  push(
+    'model',
+    '模型',
+    providerModel || env.ANTHROPIC_MODEL || config?.model ? 'ok' : 'warn',
+    providerModel || env.ANTHROPIC_MODEL || config?.model || '未设置',
+    12
+  );
+
+  if (apiFormat.modelCompatibility && apiFormat.modelCompatibility.compatible === false) {
+    push('compatibility', '模型兼容性', 'bad', apiFormat.modelCompatibility.reason || '不兼容 Claude Code', 28);
+  } else if (apiFormat.modelCompatibility && apiFormat.modelCompatibility.known) {
+    push('compatibility', '模型兼容性', 'ok', '已确认 text 兼容', 0);
+  } else {
+    push('compatibility', '模型兼容性', 'warn', '未确认，建议测试连接', 6);
+  }
+
+  if (apiFormat.testResult && apiFormat.testResult.success) {
+    const stale = apiFormat.testedAt && daysSince(apiFormat.testedAt) > 7;
+    push(
+      'test',
+      '连接测试',
+      stale ? 'warn' : 'ok',
+      `${apiFormat.name || apiFormat.id || '通过'} · ${formatDateTime(apiFormat.testedAt)}`,
+      stale ? 8 : 0
+    );
+  } else if (apiFormat.testResult) {
+    push('test', '连接测试', 'bad', '最近测试失败', 25);
+  } else {
+    push('test', '连接测试', 'warn', '尚未测试', 15);
+  }
+
+  const listStatus = apiFormat.modelListStatus;
+  if (listStatus && listStatus.state === 'available') {
+    push('modelList', '模型列表', 'ok', `${listStatus.count || 0} 个模型 · ${formatDateTime(listStatus.checkedAt)}`, 0);
+  } else if (listStatus && listStatus.state === 'unavailable') {
+    push('modelList', '模型列表', 'warn', '服务未开放，使用手动/兜底模型', 4);
+  } else {
+    push('modelList', '模型列表', 'warn', '未获取', 4);
+  }
+
+  push(
+    'active',
+    '激活状态',
+    profileName && profileName === activeProfile ? 'ok' : 'warn',
+    profileName && profileName === activeProfile ? '当前已激活' : `当前激活：${activeProfile || '无'}`,
+    profileName && profileName === activeProfile ? 0 : 4
+  );
+
+  return {
+    score: Math.max(0, Math.min(100, score)),
+    status: score >= 85 ? 'ok' : score >= 60 ? 'warn' : 'bad',
+    checks
+  };
+}
+
+function setModelHint(message = '', type = '') {
+  const hint = document.getElementById('modelHint');
+  if (!hint) return;
+  if (!message) {
+    hint.textContent = '';
+    hint.classList.add('hidden');
+    hint.classList.remove('warning', 'error');
+    return;
+  }
+  hint.textContent = message;
+  hint.classList.remove('hidden');
+  hint.classList.toggle('warning', type === 'warning');
+  hint.classList.toggle('error', type === 'error');
+}
+
+function describeModelOption(model) {
+  if (!model || !model.id) return '';
+  const parts = [model.id];
+  const modalities = Array.isArray(model.output_modalities) ? model.output_modalities : [];
+  if (modalities.length > 0) parts.push(`[${modalities.join(', ')}]`);
+  if (model.owned_by) parts.push(`- ${model.owned_by}`);
+  return parts.join(' ');
+}
+
+function renderModelOptions(models = cachedAvailableModels, selectedModel = '') {
+  const input = document.getElementById('modelSelect');
+  const options = document.getElementById('modelOptions');
+  if (!input || !options) return;
+
+  options.innerHTML = '';
+  const fallbackModels = getFallbackModelRecords(parseJson(getJsonEditorValue()) || {});
+  const mergedModels = [...(models || []), ...fallbackModels];
+  const seen = new Set();
+  mergedModels.forEach(model => {
+    if (!model || !model.id || seen.has(model.id)) return;
+    seen.add(model.id);
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.label = describeModelOption(model);
+    options.appendChild(option);
+  });
+
+  if (selectedModel && !seen.has(selectedModel)) {
+    const current = document.createElement('option');
+    current.value = selectedModel;
+    current.label = '当前模型';
+    options.insertBefore(current, options.firstChild);
+  }
+
+  input.disabled = false;
+  input.placeholder = seen.size > 0
+    ? '选择或输入模型 ID'
+    : selectedModel
+      ? '当前模型'
+      : '手动输入模型 ID';
+  if (document.activeElement !== input) {
+    input.value = selectedModel || '';
+  }
+}
+
+function updateModelPickerFromConfig(config = parseJson(getJsonEditorValue())) {
+  const selectedModel = getProviderModelFromConfig(config);
+  renderModelOptions(cachedAvailableModels, selectedModel);
+  if (selectedModel) {
+    setModelHint(`当前模型：${selectedModel}`);
+  } else if (cachedAvailableModels.length === 0) {
+    setModelHint('');
+  }
+}
+
+function resetAvailableModels(message = '') {
+  cachedAvailableModels = [];
+  pendingModelListToken++;
+  updateModelPickerFromConfig();
+  if (message) setModelHint(message, 'warning');
+}
+
+function getCustomSelectShell(targetId) {
+  return Array.from(document.querySelectorAll('.custom-select'))
+    .find(shell => shell.dataset.target === targetId) || null;
+}
+
+function getCustomSelectLabel(targetId, value) {
+  const shell = getCustomSelectShell(targetId);
+  if (!shell) return value || '';
+  const valueText = String(value || '');
+  const options = Array.from(shell.querySelectorAll('.custom-select-menu button[data-value]'));
+  const selected = options.find(option => String(option.dataset.value || '') === valueText);
+  if (selected) return selected.textContent.trim();
+  return valueText || (options[0] ? options[0].textContent.trim() : '未选择');
+}
+
+function closeCustomSelect(shell) {
+  if (!shell) return;
+  const button = shell.querySelector('.custom-select-button');
+  const menu = shell.querySelector('.custom-select-menu');
+  shell.classList.remove('open');
+  if (menu) menu.classList.add('hidden');
+  if (button) button.setAttribute('aria-expanded', 'false');
+}
+
+function closeAllCustomSelects(except = null) {
+  document.querySelectorAll('.custom-select.open').forEach(shell => {
+    if (shell !== except) closeCustomSelect(shell);
+  });
+}
+
+function openCustomSelect(shell) {
+  const button = shell.querySelector('.custom-select-button');
+  const menu = shell.querySelector('.custom-select-menu');
+  if (!button || !menu) return;
+  closeAllCustomSelects(shell);
+  shell.classList.add('open');
+  menu.classList.remove('hidden');
+  button.setAttribute('aria-expanded', 'true');
+}
+
+function setCustomSelectValue(targetId, value, { silent = false } = {}) {
+  const input = document.getElementById(targetId);
+  const shell = getCustomSelectShell(targetId);
+  if (!input) return;
+
+  const nextValue = String(value || '');
+  const previousValue = input.value;
+  input.value = nextValue;
+
+  if (shell) {
+    const button = shell.querySelector('.custom-select-button');
+    const options = Array.from(shell.querySelectorAll('.custom-select-menu button[data-value]'));
+    const label = getCustomSelectLabel(targetId, nextValue);
+    if (button) {
+      button.textContent = label;
+      button.title = label;
+    }
+    options.forEach(option => {
+      const selected = String(option.dataset.value || '') === nextValue;
+      option.classList.toggle('selected', selected);
+      option.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+  }
+
+  if (!silent && previousValue !== nextValue) {
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+}
+
+function setupCustomSelects() {
+  document.querySelectorAll('.custom-select').forEach(shell => {
+    const targetId = shell.dataset.target;
+    const input = document.getElementById(targetId);
+    const button = shell.querySelector('.custom-select-button');
+    const menu = shell.querySelector('.custom-select-menu');
+    if (!targetId || !input || !button || !menu) return;
+
+    button.setAttribute('aria-haspopup', 'listbox');
+    button.setAttribute('aria-expanded', 'false');
+
+    if (shell.dataset.ready !== 'true') {
+      button.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (shell.classList.contains('open')) {
+          closeCustomSelect(shell);
+        } else {
+          openCustomSelect(shell);
+        }
+      });
+
+      button.addEventListener('keydown', event => {
+        if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+        event.preventDefault();
+        openCustomSelect(shell);
+        const options = Array.from(menu.querySelectorAll('button[data-value]:not(:disabled)'));
+        const selectedIndex = options.findIndex(option => option.classList.contains('selected'));
+        const nextIndex = event.key === 'ArrowUp'
+          ? Math.max(0, selectedIndex < 0 ? options.length - 1 : selectedIndex - 1)
+          : Math.min(options.length - 1, selectedIndex + 1);
+        if (options[nextIndex]) options[nextIndex].focus();
+      });
+
+      menu.addEventListener('click', event => {
+        const option = event.target.closest('button[data-value]');
+        if (!option || option.disabled) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setCustomSelectValue(targetId, option.dataset.value || '');
+        closeCustomSelect(shell);
+        button.focus();
+      });
+
+      menu.addEventListener('keydown', event => {
+        const option = event.target.closest('button[data-value]');
+        if (!option) return;
+        const options = Array.from(menu.querySelectorAll('button[data-value]:not(:disabled)'));
+        const currentIndex = options.indexOf(option);
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          option.click();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault();
+          const direction = event.key === 'ArrowDown' ? 1 : -1;
+          const next = options[currentIndex + direction] || options[currentIndex];
+          if (next) next.focus();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          closeCustomSelect(shell);
+          button.focus();
+        }
+      });
+
+      shell.dataset.ready = 'true';
+    }
+
+    setCustomSelectValue(targetId, input.value, { silent: true });
+  });
+
+  if (document.body.dataset.customSelectGlobalReady !== 'true') {
+    document.addEventListener('click', () => closeAllCustomSelects());
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeAllCustomSelects();
+    });
+    document.body.dataset.customSelectGlobalReady = 'true';
+  }
+}
+
+function isModelListDiscoveryUnavailable(attempts = []) {
+  const meaningfulAttempts = attempts.filter(attempt => attempt && (attempt.statusCode || attempt.error));
+  if (meaningfulAttempts.length === 0) return false;
+  return meaningfulAttempts.every(attempt => [404, 405, 501].includes(Number(attempt.statusCode)));
+}
+
+function saveModelListStatusToConfig(status) {
+  const config = parseJson(getJsonEditorValue()) || {};
+  if (!config.apiFormat) config.apiFormat = {};
+  config.apiFormat.modelListStatus = Object.assign({ checkedAt: new Date().toISOString() }, status);
+  setJsonEditorValue(JSON.stringify(config, null, 2));
+  syncFieldsFromJson();
+}
+
+function normalizeClaudeCodeBaseUrl(baseUrl, mode = 'auto') {
   if (!baseUrl || typeof baseUrl !== 'string') return baseUrl;
+  // direct 模式下 Base URL 本身即完整端点，保持原样（只去掉尾部斜杠）
+  if (mode === 'direct') {
+    return baseUrl.trim().replace(/\/+$/, '');
+  }
   // Claude Code appends /v1/messages at runtime; chat-completions endpoints are only for connection tests.
   return baseUrl
     .trim()
@@ -309,17 +1059,32 @@ function normalizeForClaudeCodeActivation(profileData) {
   }
 
   if (normalized.env && normalized.env.ANTHROPIC_BASE_URL) {
-    normalized.env.ANTHROPIC_BASE_URL = normalizeClaudeCodeBaseUrl(normalized.env.ANTHROPIC_BASE_URL);
+    const mode = (normalized.apiFormat && normalized.apiFormat.endpointMode) || 'auto';
+    normalized.env.ANTHROPIC_BASE_URL = normalizeClaudeCodeBaseUrl(normalized.env.ANTHROPIC_BASE_URL, mode);
   }
 
   return normalized;
 }
 
+function getCurrentEndpointMode() {
+  const select = document.getElementById('endpointMode');
+  if (select && select.value) return select.value;
+  const parsed = parseJson(getJsonEditorValue());
+  return (parsed && parsed.apiFormat && parsed.apiFormat.endpointMode) || 'auto';
+}
+
 function setBaseUrlHint(message = '', isWarning = false) {
   const hint = document.getElementById('baseUrlHint');
   if (!hint) return;
-  hint.textContent = message || '填写 /v1/messages 前面的地址，Clave 会自动移除完整端点。';
-  hint.classList.toggle('warning', isWarning);
+  if (message) {
+    hint.textContent = message;
+    hint.classList.remove('hidden');
+    hint.classList.toggle('warning', isWarning);
+  } else {
+    hint.textContent = '';
+    hint.classList.add('hidden');
+    hint.classList.remove('warning');
+  }
 }
 
 function normalizeBaseUrlField({ notify = false } = {}) {
@@ -327,7 +1092,17 @@ function normalizeBaseUrlField({ notify = false } = {}) {
   if (!input) return '';
 
   const raw = input.value.trim();
-  const normalized = normalizeClaudeCodeBaseUrl(raw);
+  const mode = getCurrentEndpointMode();
+
+  // direct 模式下不剥离端点
+  if (mode === 'direct') {
+    const stripped = raw.replace(/\/+$/, '');
+    if (stripped !== raw) input.value = stripped;
+    setBaseUrlHint();
+    return stripped;
+  }
+
+  const normalized = normalizeClaudeCodeBaseUrl(raw, mode);
   if (raw && normalized !== raw) {
     input.value = normalized;
     setBaseUrlHint(`已自动改为 Claude Code Base URL：${normalized}`, true);
@@ -346,9 +1121,21 @@ function updateProfileNameHint() {
 
   const result = validateProfileName(input.value, { currentName: currentLoadedProfile || selectedProfile });
   input.classList.toggle('invalid', !result.valid);
-  hint.textContent = result.message || '名称会用于 settings.<name>.json 文件名。';
-  hint.classList.toggle('error', !result.valid);
-  hint.classList.toggle('warning', result.valid && input.value.trim() !== (currentLoadedProfile || selectedProfile || ''));
+  const isRenamed = result.valid && input.value.trim() !== (currentLoadedProfile || selectedProfile || '');
+
+  if (!result.valid) {
+    hint.textContent = result.message;
+    hint.classList.add('error');
+    hint.classList.remove('warning', 'hidden');
+  } else if (isRenamed) {
+    hint.textContent = `将保存为 settings.${input.value.trim()}.json`;
+    hint.classList.add('warning');
+    hint.classList.remove('error', 'hidden');
+  } else {
+    hint.textContent = '';
+    hint.classList.add('hidden');
+    hint.classList.remove('error', 'warning');
+  }
   return result.valid;
 }
 
@@ -373,7 +1160,7 @@ function setJsonStatusNote(message, type = '') {
 function validateJsonEditor() {
   const editor = document.getElementById('profileJson');
   if (!editor) return null;
-  const { value, error } = parseJsonWithError(editor.value);
+  const { value, error } = parseJsonWithError(getJsonEditorValue());
   if (error) {
     setJsonStatus(`JSON 无效：${error.message}`, 'error');
     return null;
@@ -387,7 +1174,7 @@ function formatJsonEditor() {
   if (!editor) return;
   const parsed = validateJsonEditor();
   if (!parsed) return;
-  editor.value = JSON.stringify(parsed, null, 2);
+  setJsonEditorValue(JSON.stringify(parsed, null, 2));
   syncFieldsFromJson();
   setJsonStatus('JSON 已格式化', 'success');
 }
@@ -452,138 +1239,86 @@ function findMatchingJsonBracket(text, bracketIndex) {
   return -1;
 }
 
+function findMatchingQuote(text, quoteIndex) {
+  // 扫描 JSON 字符串，判断 quoteIndex 处的 " 是开还是关，找配对的另一端。
+  let inString = false;
+  let escaped = false;
+  let stringStart = -1;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) { escaped = false; continue; }
+    if (inString && ch === '\\') { escaped = true; continue; }
+    if (ch === '"') {
+      if (!inString) {
+        inString = true;
+        stringStart = i;
+        if (i === quoteIndex) {
+          // 找关闭那一个
+          for (let j = i + 1; j < text.length; j += 1) {
+            if (escaped) { escaped = false; continue; }
+            if (text[j] === '\\') { escaped = true; continue; }
+            if (text[j] === '"') return j;
+          }
+          return -1;
+        }
+      } else {
+        inString = false;
+        if (i === quoteIndex) return stringStart;
+      }
+    }
+  }
+  return -1;
+}
+
 function getBracketIndexNearCaret(text, caret) {
   const candidates = [caret, caret - 1];
-  return candidates.find(index => index >= 0 && index < text.length && '{}[]'.includes(text[index])) ?? -1;
-}
-
-function clearJsonBracketMarkers() {
-  const layer = document.getElementById('jsonBracketMarkers');
-  if (layer) layer.replaceChildren();
-  activeJsonBracketMatch = null;
-}
-
-function clearJsonBracketMarkerElements() {
-  const layer = document.getElementById('jsonBracketMarkers');
-  if (layer) layer.replaceChildren();
-}
-
-function getTextareaIndexRect(textarea, index) {
-  const computed = window.getComputedStyle(textarea);
-  const mirror = document.createElement('div');
-  const marker = document.createElement('span');
-  const properties = [
-    'fontFamily',
-    'fontSize',
-    'fontWeight',
-    'fontStyle',
-    'letterSpacing',
-    'lineHeight',
-    'textTransform',
-    'textAlign',
-    'textIndent',
-    'tabSize',
-    'paddingTop',
-    'paddingRight',
-    'paddingBottom',
-    'paddingLeft',
-    'borderTopWidth',
-    'borderRightWidth',
-    'borderBottomWidth',
-    'borderLeftWidth',
-    'boxSizing'
-  ];
-
-  properties.forEach(property => {
-    mirror.style[property] = computed[property];
-  });
-
-  mirror.style.position = 'absolute';
-  mirror.style.visibility = 'hidden';
-  mirror.style.left = '-99999px';
-  mirror.style.top = '0';
-  mirror.style.width = `${textarea.offsetWidth}px`;
-  mirror.style.minHeight = '0';
-  mirror.style.height = 'auto';
-  mirror.style.whiteSpace = 'pre-wrap';
-  mirror.style.wordBreak = 'break-word';
-  mirror.style.overflowWrap = 'break-word';
-
-  mirror.textContent = textarea.value.slice(0, index);
-  marker.textContent = textarea.value[index] || '\u200b';
-  mirror.appendChild(marker);
-  document.body.appendChild(mirror);
-
-  const mirrorRect = mirror.getBoundingClientRect();
-  const markerRect = marker.getBoundingClientRect();
-  const result = {
-    left: markerRect.left - mirrorRect.left - textarea.scrollLeft,
-    top: markerRect.top - mirrorRect.top - textarea.scrollTop,
-    width: Math.max(markerRect.width, Number.parseFloat(computed.fontSize) * 0.65),
-    height: markerRect.height || Number.parseFloat(computed.lineHeight) || 18
-  };
-
-  mirror.remove();
-  return result;
-}
-
-function renderJsonBracketMarker(textarea, index, isAnchor = false) {
-  const layer = document.getElementById('jsonBracketMarkers');
-  if (!layer) return;
-
-  const rect = getTextareaIndexRect(textarea, index);
-  const marker = document.createElement('span');
-  marker.className = `bracket-marker${isAnchor ? ' anchor' : ''}`;
-  marker.textContent = textarea.value[index];
-  marker.style.left = `${rect.left}px`;
-  marker.style.top = `${rect.top}px`;
-  marker.style.width = `${rect.width}px`;
-  marker.style.height = `${rect.height}px`;
-  layer.appendChild(marker);
-}
-
-function renderActiveJsonBracketMarkers() {
-  const editor = document.getElementById('profileJson');
-  if (!editor || !activeJsonBracketMatch) return;
-  const { bracketIndex, matchIndex } = activeJsonBracketMatch;
-  if (editor.value[bracketIndex] === undefined || editor.value[matchIndex] === undefined) {
-    clearJsonBracketMarkers();
-    return;
-  }
-
-  clearJsonBracketMarkerElements();
-  renderJsonBracketMarker(editor, bracketIndex, true);
-  renderJsonBracketMarker(editor, matchIndex);
+  return candidates.find(index => index >= 0 && index < text.length && '{}[]"'.includes(text[index])) ?? -1;
 }
 
 function markMatchingJsonBracket() {
   const editor = document.getElementById('profileJson');
   if (!editor) return;
-  clearJsonBracketMarkers();
 
-  if (editor.selectionStart !== editor.selectionEnd) {
-    validateJsonEditor();
+  const text = getJsonEditorValue();
+
+  // 有选区：保持当前高亮不变，不做任何 validation/status 变动
+  if (getJsonEditorSelectionCount() > 0) {
     return;
   }
 
-  const bracketIndex = getBracketIndexNearCaret(editor.value, editor.selectionStart);
+  const caret = getJsonEditorCaret();
+  const bracketIndex = getBracketIndexNearCaret(text, caret);
   if (bracketIndex === -1) {
-    validateJsonEditor();
+    if (activeJsonBracketMatch) {
+      // 原本有高亮的场合需要清掉
+      activeJsonBracketMatch = null;
+      renderJsonEditorContent(text, -1, -1);
+      setJsonEditorCaret(caret);
+    }
     return;
   }
 
-  const matchIndex = findMatchingJsonBracket(editor.value, bracketIndex);
+  const ch = text[bracketIndex];
+  const matchIndex = ch === '"'
+    ? findMatchingQuote(text, bracketIndex)
+    : findMatchingJsonBracket(text, bracketIndex);
+
   if (matchIndex === -1) {
-    setJsonStatusNote(`未找到匹配的 ${editor.value[bracketIndex]}`, 'error');
+    // 找不到配对：不报错、不打扰用户，只清掉既有高亮
+    if (activeJsonBracketMatch) {
+      activeJsonBracketMatch = null;
+      renderJsonEditorContent(text, -1, -1);
+      setJsonEditorCaret(caret);
+    }
     return;
   }
 
-  requestAnimationFrame(() => {
-    activeJsonBracketMatch = { bracketIndex, matchIndex };
-    renderActiveJsonBracketMarkers();
-    setJsonStatusNote(`已标识匹配的 ${editor.value[bracketIndex]} ${editor.value[matchIndex]}`, 'success');
-  });
+  activeJsonBracketMatch = { bracketIndex, matchIndex };
+  renderJsonEditorContent(text, bracketIndex, matchIndex);
+  setJsonEditorCaret(caret);
+  setJsonStatusNote(`已标识匹配的 ${text[bracketIndex]} ${text[matchIndex]}`, 'success');
 }
+
 
 function getActiveProfile(force = false) {
   if (!force && cachedActiveProfile !== null) {
@@ -646,6 +1381,13 @@ function getProfileMeta(profileName) {
   }
   profileMetaCache.set(profileName, '');
   return '';
+}
+
+function getProfileScenarioName(profileName) {
+  const parsed = parseJson(readProfileText(profileName));
+  if (!parsed || !parsed.apiFormat || !parsed.apiFormat.scenarioTag) return '';
+  const scenario = SCENARIO_PRESETS.find(item => item.id === parsed.apiFormat.scenarioTag);
+  return scenario ? scenario.name : parsed.apiFormat.scenarioName || '';
 }
 
 function getDefaultProfileTemplate() {
@@ -718,8 +1460,7 @@ function getDefaultProfileTemplate() {
 }
 
 function buildJsonFromFields({ normalizeBaseUrl = false } = {}) {
-  const jsonNode = document.getElementById('profileJson');
-  const current = parseJson(jsonNode.value) || {};
+  const current = parseJson(getJsonEditorValue()) || {};
   if (!current.env) current.env = {};
 
   current.env.ANTHROPIC_BASE_URL = normalizeBaseUrl
@@ -731,20 +1472,112 @@ function buildJsonFromFields({ normalizeBaseUrl = false } = {}) {
     current.env.CLAUDE_CODE_ATTRIBUTION_HEADER = "0";
   }
 
+  const modeSelect = document.getElementById('endpointMode');
+  if (modeSelect && modeSelect.value) {
+    if (!current.apiFormat) current.apiFormat = {};
+    current.apiFormat.endpointMode = modeSelect.value;
+  }
+
+  const providerSelect = document.getElementById('providerTemplate');
+  if (providerSelect && providerSelect.value) {
+    const template = getTemplateById(providerSelect.value);
+    if (!current.apiFormat) current.apiFormat = {};
+    current.apiFormat.providerTemplate = template.id;
+    current.apiFormat.providerTemplateName = template.name;
+  }
+
+  const modelInput = document.getElementById('modelSelect');
+  const providerModel = modelInput ? modelInput.value.trim() : '';
+  if (providerModel) {
+    if (!current.apiFormat) current.apiFormat = {};
+    current.apiFormat.providerModel = providerModel;
+    current.env.ANTHROPIC_MODEL = providerModel;
+    if (!current.model) {
+      current.model = CLAUDE_CODE_FALLBACK_MODEL;
+    } else if (!isClaudeCodeModel(current.model)) {
+      current.model = providerModel;
+    }
+  }
+
+  const thinkingToggle = document.getElementById('toggleThinking');
+  if (thinkingToggle) {
+    current.alwaysThinkingEnabled = !!thinkingToggle.checked;
+    current.env.CLAUDE_CODE_DISABLE_THINKING = thinkingToggle.checked ? "0" : "1";
+  }
+
+  const effortSelect = document.getElementById('effortLevel');
+  if (effortSelect && effortSelect.value) {
+    current.effortLevel = effortSelect.value;
+    current.env.CLAUDE_CODE_EFFORT_LEVEL = effortSelect.value;
+  }
+
+  const permModeSelect = document.getElementById('permissionsMode');
+  if (permModeSelect && permModeSelect.value) {
+    if (!current.permissions) current.permissions = {};
+    current.permissions.defaultMode = permModeSelect.value;
+    delete current.permissions.mode;
+  }
+
+  const scenarioSelect = document.getElementById('scenarioTag');
+  if (scenarioSelect) {
+    const scenario = SCENARIO_PRESETS.find(item => item.id === scenarioSelect.value) || SCENARIO_PRESETS[0];
+    if (!current.apiFormat) current.apiFormat = {};
+    if (scenario.id) {
+      current.apiFormat.scenarioTag = scenario.id;
+      current.apiFormat.scenarioName = scenario.name;
+    } else {
+      delete current.apiFormat.scenarioTag;
+      delete current.apiFormat.scenarioName;
+    }
+  }
+
   return JSON.stringify(current, null, 2);
 }
 
 function syncFieldsFromJson() {
-  const parsed = parseJson(document.getElementById('profileJson').value);
+  const parsed = parseJson(getJsonEditorValue());
   if (!parsed || !parsed.env) return;
 
   document.getElementById('baseUrl').value = parsed.env.ANTHROPIC_BASE_URL || '';
+  const modeSelect = document.getElementById('endpointMode');
+  if (modeSelect) {
+    setCustomSelectValue('endpointMode', (parsed.apiFormat && parsed.apiFormat.endpointMode) || 'auto', { silent: true });
+  }
+  const providerSelect = document.getElementById('providerTemplate');
+  if (providerSelect) {
+    const template = detectProviderTemplate(parsed);
+    setCustomSelectValue('providerTemplate', template.id, { silent: true });
+    updateProviderTemplateHint(template);
+  }
   normalizeBaseUrlField();
   document.getElementById('apiKey').value = parsed.env.ANTHROPIC_AUTH_TOKEN || '';
+
+  const thinkingToggle = document.getElementById('toggleThinking');
+  if (thinkingToggle) {
+    thinkingToggle.checked = parsed.alwaysThinkingEnabled === true
+      || parsed.env.CLAUDE_CODE_DISABLE_THINKING === "0";
+  }
+  const effortSelect = document.getElementById('effortLevel');
+  if (effortSelect) {
+    const lvl = parsed.effortLevel || parsed.env.CLAUDE_CODE_EFFORT_LEVEL || 'medium';
+    setCustomSelectValue('effortLevel', ['low', 'medium', 'high', 'max'].includes(lvl) ? lvl : 'medium', { silent: true });
+  }
+  const permModeSelect = document.getElementById('permissionsMode');
+  if (permModeSelect) {
+    const pm = (parsed.permissions && (parsed.permissions.defaultMode || parsed.permissions.mode)) || 'default';
+    setCustomSelectValue('permissionsMode', ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions', 'dontAsk'].includes(pm) ? pm : 'default', { silent: true });
+  }
+  const scenarioSelect = document.getElementById('scenarioTag');
+  if (scenarioSelect) {
+    const scenario = (parsed.apiFormat && parsed.apiFormat.scenarioTag) || '';
+    setCustomSelectValue('scenarioTag', SCENARIO_PRESETS.some(item => item.id === scenario) ? scenario : '', { silent: true });
+  }
+  updateModelPickerFromConfig(parsed);
+  renderHealthPanel(parsed);
 }
 
 function syncJsonFromFields(options = {}) {
-  document.getElementById('profileJson').value = buildJsonFromFields(options);
+  setJsonEditorValue(buildJsonFromFields(options));
 }
 
 function syncStatus() {
@@ -757,12 +1590,415 @@ function syncStatus() {
   }
 }
 
-function saveProfileFile(name, jsonText) {
+function updateProviderTemplateHint(template = getTemplateById('custom')) {
+  const hint = document.getElementById('providerTemplateHint');
+  if (!hint) return;
+  if (!template || template.id === 'custom') {
+    hint.textContent = '自定义模式：保留当前地址、端点模式和模型。';
+  } else {
+    hint.textContent = template.description;
+  }
+  hint.classList.remove('hidden', 'error');
+  hint.classList.toggle('warning', template && template.id !== 'custom');
+}
+
+function renderHealthPanel(config = parseJson(getJsonEditorValue()) || {}) {
+  const scoreEl = document.getElementById('healthScore');
+  const summaryEl = document.getElementById('healthSummary');
+  const checksEl = document.getElementById('healthChecks');
+  if (!scoreEl || !summaryEl || !checksEl) return;
+
+  const report = buildHealthReport(config, selectedProfile, getActiveProfile());
+  scoreEl.textContent = String(report.score);
+  scoreEl.classList.toggle('warn', report.status === 'warn');
+  scoreEl.classList.toggle('bad', report.status === 'bad');
+  summaryEl.textContent = report.status === 'ok'
+    ? '配置状态良好，可以放心切换。'
+    : report.status === 'warn'
+      ? '配置可用但仍有风险项，建议测试或补齐信息。'
+      : '配置存在阻断项，暂不建议激活。';
+
+  checksEl.innerHTML = '';
+  report.checks.forEach(check => {
+    const item = document.createElement('div');
+    item.className = 'health-check';
+    const label = document.createElement('div');
+    label.className = 'health-check-label';
+    const dot = document.createElement('span');
+    dot.className = `health-dot ${check.status === 'ok' ? 'health-ok' : check.status === 'bad' ? 'health-bad' : 'health-warn'}`;
+    const text = document.createElement('span');
+    text.textContent = check.label;
+    const value = document.createElement('div');
+    value.className = 'health-check-value';
+    value.textContent = sanitizeDiagnosticText(check.detail);
+    label.appendChild(dot);
+    label.appendChild(text);
+    item.appendChild(label);
+    item.appendChild(value);
+    checksEl.appendChild(item);
+  });
+}
+
+function renderRuntimeInfo() {
+  const summary = document.getElementById('runtimeSummary');
+  const details = document.getElementById('runtimeDetails');
+  if (!summary || !details || !runtime) return;
+  const appStatus = runtime.getApplicationsAppStatus();
+  summary.textContent = appStatus.exists
+    ? (appStatus.isCurrent ? '当前从 /Applications 运行。' : '/Applications 存在一个 Clave 包。')
+    : '未检测到 /Applications/Clave.app。';
+  details.innerHTML = '';
+  [
+    ['当前包', runtime.appBundlePath || '未知'],
+    ['Applications', appStatus.exists ? `${appStatus.path} · ${appStatus.modifiedAt ? formatDateTime(appStatus.modifiedAt) : '存在'}` : '未安装'],
+    ['版本', appPackage.version || 'unknown']
+  ].forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'runtime-row';
+    const labelEl = document.createElement('span');
+    labelEl.textContent = label;
+    const valueEl = document.createElement('span');
+    valueEl.textContent = value;
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    details.appendChild(row);
+  });
+}
+
+function openCurrentAppLocation() {
+  if (!runtime || !runtime.showCurrentAppInFinder) return;
+  runtime.showCurrentAppInFinder();
+}
+
+function deleteOldApplicationsApp() {
+  if (!runtime || !runtime.deleteApplicationsApp) return;
+  const status = runtime.getApplicationsAppStatus();
+  if (!status.exists) {
+    showAlert('/Applications 中没有旧 Clave 包。');
+    renderRuntimeInfo();
+    return;
+  }
+  if (status.isCurrent) {
+    showAlert('当前正在从 /Applications 运行，不能删除自身。');
+    return;
+  }
+  showConfirm('确定删除 /Applications/Clave.app 吗？这只会删除旧应用包，不会删除配置。', (confirmed) => {
+    if (!confirmed) return;
+    try {
+      runtime.deleteApplicationsApp();
+      renderRuntimeInfo();
+      showAlert('已删除 /Applications/Clave.app。');
+    } catch (error) {
+      showAlert(`删除失败：${error.message || String(error)}`);
+    }
+  });
+}
+
+function syncCurrentAppToApplications() {
+  if (!runtime || !runtime.installCurrentAppToApplications) return;
+  showConfirm('确定把当前运行的 Clave 同步到 /Applications/Clave.app 吗？这会覆盖同名旧包。', (confirmed) => {
+    if (!confirmed) return;
+    try {
+      runtime.installCurrentAppToApplications();
+      renderRuntimeInfo();
+      showAlert('已同步当前 Clave 到 /Applications。');
+    } catch (error) {
+      showAlert(`同步失败：${error.message || String(error)}`);
+    }
+  });
+}
+
+function applyProviderTemplate(templateId) {
+  const template = getTemplateById(templateId);
+  const config = parseJson(getJsonEditorValue()) || {};
+  if (!config.env) config.env = {};
+  if (!config.apiFormat) config.apiFormat = {};
+
+  if (template.baseUrl) {
+    config.env.ANTHROPIC_BASE_URL = template.baseUrl;
+  }
+  if (template.defaultModel) {
+    config.apiFormat.providerModel = template.defaultModel;
+    config.env.ANTHROPIC_MODEL = template.defaultModel;
+    if (!config.model || !isClaudeCodeModel(config.model)) {
+      config.model = template.defaultModel;
+    }
+  }
+
+  const format = getFormatById(template.formatId);
+  if (format) {
+    config.apiFormat.id = format.id;
+    config.apiFormat.name = format.name;
+    config.apiFormat.endpoint = format.endpoint;
+    config.apiFormat.authHeader = format.authHeader;
+    config.apiFormat.authPrefix = format.authPrefix;
+  }
+  config.apiFormat.endpointMode = template.endpointMode || 'auto';
+  config.apiFormat.providerTemplate = template.id;
+  config.apiFormat.providerTemplateName = template.name;
+  if (template.knownModels && template.knownModels.length > 0) {
+    config.apiFormat.knownModels = template.knownModels.slice();
+  } else {
+    delete config.apiFormat.knownModels;
+  }
+  delete config.apiFormat.modelCompatibility;
+  delete config.apiFormat.testResult;
+
+  setJsonEditorValue(JSON.stringify(config, null, 2));
+  cachedAvailableModels = modelRecordsFromIds(template.knownModels || [], template.name);
+  syncFieldsFromJson();
+  setJsonStatus(`已应用模板：${template.name}`, 'success');
+  setModelHint(template.knownModels && template.knownModels.length > 0
+    ? `已加载 ${template.knownModels.length} 个已知模型。`
+    : '模板已应用，可手动输入模型或获取模型列表。',
+  'warning');
+}
+
+function applySelectedProviderTemplate() {
+  const select = document.getElementById('providerTemplate');
+  if (!select) return;
+  applyProviderTemplate(select.value);
+}
+
+function createSnapshotFromExisting(name, reason = '保存前快照', nextText = '') {
+  try {
+    if (!name || !fileExists(profilePath(name))) return null;
+    const previousText = readText(profilePath(name));
+    if (!previousText || previousText === nextText) return null;
+    return historyApi.writeSnapshot(name, previousText, reason);
+  } catch (error) {
+    console.warn('createSnapshotFromExisting failed:', error);
+    return null;
+  }
+}
+
+function saveProfileFile(name, jsonText, options = {}) {
   ensureFolder(claudeRoot);
+  if (options.snapshot !== false) {
+    createSnapshotFromExisting(name, options.reason || '保存前快照', jsonText);
+  }
   writeText(profilePath(name), jsonText);
   profileTextCache.set(name, jsonText);
   profileMetaCache.delete(name);
   cachedProfiles = null;
+  refreshHistoryPanel();
+}
+
+function setHistorySelectOptions(options, selectedValue = '') {
+  const menu = document.querySelector('.custom-select[data-target="historySelect"] .custom-select-menu');
+  if (!menu) return;
+  menu.innerHTML = '';
+  options.forEach(item => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.dataset.value = item.value || '';
+    button.textContent = item.label;
+    if (item.disabled) button.disabled = true;
+    menu.appendChild(button);
+  });
+  setCustomSelectValue('historySelect', selectedValue, { silent: true });
+}
+
+function saveManualSnapshot() {
+  const selected = ensureSelection();
+  if (!selected) return;
+
+  const jsonText = getJsonEditorValue();
+  if (!jsonText.trim()) {
+    showAlert('当前 JSON 为空，无法保存快照。');
+    return;
+  }
+
+  const { error } = parseJsonWithError(jsonText);
+  if (error) {
+    setJsonStatus(`JSON 无效：${error.message}`, 'error');
+    showAlert('JSON 无效，请修正后再保存快照。');
+    return;
+  }
+
+  try {
+    const snapshot = historyApi.writeSnapshot(selected, jsonText, '手动快照');
+    refreshHistoryPanel();
+    if (snapshot && snapshot.id) {
+      setCustomSelectValue('historySelect', snapshot.id, { silent: true });
+    }
+    showToast('已保存快照。');
+  } catch (error) {
+    showAlert(`保存快照失败：${error.message || String(error)}`);
+  }
+}
+
+function refreshHistoryPanel() {
+  const select = document.getElementById('historySelect');
+  const summary = document.getElementById('historySummary');
+  if (!select || !summary) return;
+
+  if (!selectedProfile) {
+    setHistorySelectOptions([{ value: '', label: '请先选择配置', disabled: true }], '');
+    summary.textContent = '未选择配置。';
+    return;
+  }
+
+  let snapshots = [];
+  try {
+    snapshots = historyApi.listSnapshots(selectedProfile);
+  } catch (error) {
+    summary.textContent = `读取历史失败：${error.message || String(error)}`;
+    return;
+  }
+
+  if (snapshots.length === 0) {
+    setHistorySelectOptions([{ value: '', label: '暂无快照', disabled: true }], '');
+    summary.textContent = '点击“保存快照”可手动留档，覆盖保存前也会自动留档。';
+    return;
+  }
+
+  const options = snapshots.map(snapshot => ({
+    value: snapshot.id,
+    label: `${formatDateTime(snapshot.createdAt)} · ${snapshot.reason || '保存前快照'}`
+  }));
+  const currentValue = snapshots.some(snapshot => snapshot.id === select.value)
+    ? select.value
+    : snapshots[0].id;
+  setHistorySelectOptions(options, currentValue);
+  summary.textContent = `已保存 ${snapshots.length} 个快照，最多保留 30 个。`;
+}
+
+function flattenJsonKeys(value, prefix = '', out = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    out[prefix || 'value'] = value;
+    return out;
+  }
+  Object.keys(value).sort().forEach(key => {
+    const nextPrefix = prefix ? `${prefix}.${key}` : key;
+    const child = value[key];
+    if (child && typeof child === 'object' && !Array.isArray(child)) {
+      flattenJsonKeys(child, nextPrefix, out);
+    } else {
+      out[nextPrefix] = child;
+    }
+  });
+  return out;
+}
+
+function buildJsonDiffRows(beforeText, afterText) {
+  const before = parseJson(beforeText);
+  const after = parseJson(afterText);
+  if (!before || !after) {
+    return [{
+      keyPath: 'JSON',
+      before: before ? '有效' : '无法解析',
+      after: after ? '有效' : '无法解析'
+    }];
+  }
+  const beforeFlat = flattenJsonKeys(before);
+  const afterFlat = flattenJsonKeys(after);
+  const keys = uniqueStrings([...Object.keys(beforeFlat), ...Object.keys(afterFlat)]).sort();
+  return keys
+    .filter(key => JSON.stringify(beforeFlat[key]) !== JSON.stringify(afterFlat[key]))
+    .slice(0, 80)
+    .map(key => ({
+      keyPath: key,
+      before: valueForPreview(beforeFlat[key], key),
+      after: valueForPreview(afterFlat[key], key)
+    }));
+}
+
+function showDiffDialog(titleText, rows) {
+  const overlay = document.createElement('div');
+  overlay.className = 'dialog-overlay';
+  const dialog = document.createElement('div');
+  dialog.className = 'dialog-card wide';
+  const title = document.createElement('div');
+  title.className = 'dialog-message';
+  title.textContent = titleText;
+  const list = document.createElement('div');
+  list.className = 'preview-list';
+
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'preview-row';
+    empty.textContent = '没有可见差异。';
+    list.appendChild(empty);
+  } else {
+    rows.forEach(row => {
+      const item = document.createElement('div');
+      item.className = 'preview-row';
+      const label = document.createElement('div');
+      label.className = 'preview-label';
+      label.textContent = row.keyPath;
+      const before = document.createElement('div');
+      before.className = 'preview-value';
+      before.textContent = `快照：${row.before}`;
+      const after = document.createElement('div');
+      after.className = 'preview-value preview-change';
+      after.textContent = `当前：${row.after}`;
+      item.appendChild(label);
+      item.appendChild(before);
+      item.appendChild(after);
+      list.appendChild(item);
+    });
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'dialog-actions';
+  const ok = document.createElement('button');
+  ok.className = 'btn-action btn-primary';
+  ok.textContent = '完成';
+  actions.appendChild(ok);
+  dialog.appendChild(title);
+  dialog.appendChild(list);
+  dialog.appendChild(actions);
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  const close = () => {
+    if (document.body.contains(overlay)) document.body.removeChild(overlay);
+  };
+  ok.onclick = close;
+  overlay.onclick = event => { if (event.target === overlay) close(); };
+  ok.focus();
+}
+
+function getSelectedHistorySnapshot() {
+  const select = document.getElementById('historySelect');
+  if (!select || !select.value) {
+    showAlert('请选择一个历史快照。');
+    return null;
+  }
+  try {
+    return historyApi.readSnapshot(select.value);
+  } catch (error) {
+    showAlert(`读取快照失败：${error.message || String(error)}`);
+    return null;
+  }
+}
+
+function showSelectedHistoryDiff() {
+  const snapshot = getSelectedHistorySnapshot();
+  if (!snapshot) return;
+  const rows = buildJsonDiffRows(snapshot.jsonText, getJsonEditorValue());
+  showDiffDialog(`历史差异：${formatDateTime(snapshot.createdAt)}`, rows);
+}
+
+function restoreSelectedHistorySnapshot() {
+  const snapshot = getSelectedHistorySnapshot();
+  if (!snapshot) return;
+  showConfirm(`确定恢复到 ${formatDateTime(snapshot.createdAt)} 的快照吗？当前编辑内容会先生成快照。`, (confirmed) => {
+    if (!confirmed) return;
+    try {
+      if (selectedProfile && getJsonEditorValue().trim()) {
+        historyApi.writeSnapshot(selectedProfile, getJsonEditorValue(), '恢复前快照');
+      }
+      setJsonEditorValue(jsonPrettyOrRaw(snapshot.jsonText));
+      syncFieldsFromJson();
+      validateJsonEditor();
+      setJsonStatus('已恢复历史快照，点击保存以持久化', 'success');
+      refreshHistoryPanel();
+      showAlert('已恢复快照到编辑器。');
+    } catch (error) {
+      showAlert(`恢复失败：${error.message || String(error)}`);
+    }
+  });
 }
 
 function ensureSelection() {
@@ -787,23 +2023,15 @@ function selectProfileItem(name) {
 function getProfileHealth(profileName, activeProfile) {
   const parsed = parseJson(readProfileText(profileName));
   if (!parsed) return { label: 'JSON 错误', className: 'health-bad', title: '配置 JSON 无效' };
-  if (!parsed.env || !parsed.env.ANTHROPIC_BASE_URL || !parsed.env.ANTHROPIC_AUTH_TOKEN) {
-    return { label: '缺字段', className: 'health-bad', title: '缺少 Base URL 或 Auth Token' };
-  }
-  if (parsed.apiFormat && parsed.apiFormat.modelCompatibility && parsed.apiFormat.modelCompatibility.compatible === false) {
-    return { label: '不兼容', className: 'health-bad', title: parsed.apiFormat.modelCompatibility.reason || '模型不兼容 Claude Code' };
-  }
-  if (parsed.apiFormat && parsed.apiFormat.testResult) {
-    if (parsed.apiFormat.testResult.success) {
-      return {
-        label: profileName === activeProfile ? '已激活' : '可用',
-        className: profileName === activeProfile ? 'health-ok health-active' : 'health-ok',
-        title: `最近测试通过：${parsed.apiFormat.name || parsed.apiFormat.id || 'unknown'}`
-      };
-    }
-    return { label: '失败', className: 'health-bad', title: '最近测试失败' };
-  }
-  return { label: '未测试', className: 'health-warn', title: '尚未测试连接' };
+  const report = buildHealthReport(parsed, profileName, activeProfile);
+  const baseClass = report.status === 'ok' ? 'health-ok' : report.status === 'bad' ? 'health-bad' : 'health-warn';
+  const activeClass = profileName === activeProfile ? ' health-active' : '';
+  const blocking = report.checks.find(check => check.status === 'bad') || report.checks.find(check => check.status === 'warn');
+  return {
+    label: profileName === activeProfile ? `已激活 ${report.score}` : `健康 ${report.score}`,
+    className: `${baseClass}${activeClass}`,
+    title: blocking ? `${blocking.label}：${blocking.detail}` : '配置状态良好'
+  };
 }
 
 function rebuildProfileList(activeProfile) {
@@ -816,6 +2044,7 @@ function rebuildProfileList(activeProfile) {
     const div = document.createElement('div');
     div.className = 'sidebar-item';
     div.dataset.profile = profile;
+    div.draggable = true;
 
     if (profile === selectedProfile) {
       div.classList.add('selected');
@@ -840,6 +2069,11 @@ function rebuildProfileList(activeProfile) {
     metaSpan.style.color = 'var(--text-muted)';
     metaSpan.textContent = getProfileMeta(profile) || 'Standard';
 
+    const scenarioName = getProfileScenarioName(profile);
+    const scenarioSpan = document.createElement('span');
+    scenarioSpan.className = 'profile-scenario';
+    scenarioSpan.textContent = scenarioName;
+
     const health = getProfileHealth(profile, activeProfile);
     const statusSpan = document.createElement('span');
     statusSpan.className = 'profile-status';
@@ -853,6 +2087,7 @@ function rebuildProfileList(activeProfile) {
 
     infoDiv.appendChild(nameSpan);
     infoDiv.appendChild(metaSpan);
+    if (scenarioName) infoDiv.appendChild(scenarioSpan);
     infoDiv.appendChild(statusSpan);
     div.appendChild(infoDiv);
 
@@ -869,6 +2104,48 @@ function rebuildProfileList(activeProfile) {
       });
     };
 
+    div.addEventListener('dragstart', (e) => {
+      if (!isProfileReorderAllowed()) {
+        e.preventDefault();
+        showAlert('请先清空搜索关键词，再拖动排序。');
+        return;
+      }
+      draggingProfileName = profile;
+      div.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', profile);
+      }
+    });
+
+    div.addEventListener('dragover', (e) => {
+      if (!draggingProfileName || draggingProfileName === profile) return;
+      e.preventDefault();
+      div.classList.add('drag-over');
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+    });
+
+    div.addEventListener('dragleave', () => {
+      div.classList.remove('drag-over');
+    });
+
+    div.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (!draggingProfileName || draggingProfileName === profile) {
+        clearDragState();
+        return;
+      }
+      const moved = moveProfileOrder(draggingProfileName, profile);
+      clearDragState();
+      if (moved) {
+        rebuildProfileList(activeProfile || getActiveProfile());
+      }
+    });
+
+    div.addEventListener('dragend', () => {
+      clearDragState();
+    });
+
     listEl.appendChild(div);
   });
 }
@@ -881,14 +2158,15 @@ function loadSelectedProfile(profileName = selectedProfile) {
   const title = document.getElementById('profileTitle');
   if (title) title.value = selected;
   document.getElementById('profileName').value = selected;
-  document.getElementById('profileJson').value = fileExists(profilePath(selected))
+  setJsonEditorValue(fileExists(profilePath(selected))
     ? jsonPrettyOrRaw(readProfileText(selected))
-    : getDefaultProfileTemplate();
+    : getDefaultProfileTemplate());
 
   syncFieldsFromJson();
   updateProfileNameHint();
   validateJsonEditor();
   clearDiagnostics();
+  refreshHistoryPanel();
   syncStatus();
 }
 
@@ -903,7 +2181,7 @@ function saveCurrent() {
   }
 
   syncJsonFromFields({ normalizeBaseUrl: true });
-  const jsonText = document.getElementById('profileJson').value;
+  const jsonText = getJsonEditorValue();
   const parsed = validateJsonEditor();
   if (!parsed) {
     showAlert('JSON 格式无效，请先修正。');
@@ -912,15 +2190,53 @@ function saveCurrent() {
 
   ensureFolder(claudeRoot);
   const wasActive = previousName && getActiveProfile(true) === previousName;
-  saveProfileFile(name, jsonText);
+
   if (previousName && previousName !== name && fileExists(profilePath(previousName))) {
+    const prevContent = readText(profilePath(previousName));
+    const prevParsed = parseJson(prevContent);
+    const curParsed = parseJson(jsonText);
+    const sameIdentity = !!prevParsed && !!curParsed
+      && (prevParsed.env && curParsed.env)
+      && prevParsed.env.ANTHROPIC_BASE_URL === curParsed.env.ANTHROPIC_BASE_URL
+      && prevParsed.env.ANTHROPIC_AUTH_TOKEN === curParsed.env.ANTHROPIC_AUTH_TOKEN;
+
+    if (!sameIdentity) {
+      showConfirm(
+        `检测到 "${previousName}" 与当前编辑内容差异较大（Base URL 或 Token 不同）。\n\n确认重命名并删除旧文件吗？`,
+        (confirmed) => {
+          if (!confirmed) return;
+          saveProfileFile(name, jsonText);
+          fs.unlinkSync(profilePath(previousName));
+          replaceProfileInStoredOrder(previousName, name);
+          invalidateProfileCache(previousName);
+          if (wasActive) {
+            writeText(activeProfilePath, name);
+            cachedActiveProfile = name;
+          }
+          selectedProfile = name;
+          const title = document.getElementById('profileTitle');
+          if (title) title.value = name;
+          rebuildProfileList(name);
+          currentLoadedProfile = name;
+          syncStatus();
+          showAlert(`已保存 ${name}`);
+        }
+      );
+      return;
+    }
+
+    saveProfileFile(name, jsonText);
     fs.unlinkSync(profilePath(previousName));
+    replaceProfileInStoredOrder(previousName, name);
     invalidateProfileCache(previousName);
     if (wasActive) {
       writeText(activeProfilePath, name);
       cachedActiveProfile = name;
     }
+  } else {
+    saveProfileFile(name, jsonText);
   }
+
   selectedProfile = name;
   const title = document.getElementById('profileTitle');
   if (title) title.value = name;
@@ -946,7 +2262,7 @@ function createNewProfile() {
     document.getElementById('profileName').value = trimmedName;
     document.getElementById('baseUrl').value = '';
     document.getElementById('apiKey').value = '';
-    document.getElementById('profileJson').value = getDefaultProfileTemplate();
+    setJsonEditorValue(getDefaultProfileTemplate());
 
     saveCurrent();
     rebuildProfileList(trimmedName);
@@ -1016,6 +2332,7 @@ function clearDiagnostics() {
   if (panel) panel.classList.add('hidden');
   if (summary) summary.textContent = '等待测试结果';
   if (details) details.innerHTML = '';
+  lastDiagnostics = null;
 }
 
 function showDiagnostics({ summary, items = [], type = 'error' }) {
@@ -1024,9 +2341,22 @@ function showDiagnostics({ summary, items = [], type = 'error' }) {
   const details = document.getElementById('diagnosticDetails');
   if (!panel || !summaryEl || !details) return;
 
+  lastDiagnostics = {
+    type,
+    summary,
+    items: items.map(item => ({
+      label: item.label,
+      value: sanitizeDiagnosticText(item.value)
+    })),
+    createdAt: new Date().toISOString()
+  };
+
   panel.classList.remove('hidden');
+  panel.classList.toggle('warning', type === 'warning');
+  panel.classList.toggle('success', type === 'success');
   summaryEl.textContent = summary;
   summaryEl.classList.toggle('error', type === 'error');
+  summaryEl.classList.toggle('warning', type === 'warning');
   summaryEl.classList.toggle('success', type === 'success');
   details.innerHTML = '';
 
@@ -1043,6 +2373,31 @@ function showDiagnostics({ summary, items = [], type = 'error' }) {
     div.appendChild(value);
     details.appendChild(div);
   });
+}
+
+function buildDiagnosticsReport() {
+  if (!lastDiagnostics) return '';
+  const lines = [
+    `Clave 诊断报告`,
+    `时间：${formatDateTime(lastDiagnostics.createdAt)}`,
+    `结果：${lastDiagnostics.summary}`,
+    `类型：${lastDiagnostics.type}`,
+    ''
+  ];
+  lastDiagnostics.items.forEach(item => {
+    lines.push(`${item.label}：${item.value}`);
+  });
+  return lines.join('\n');
+}
+
+function copyDiagnosticsReport() {
+  const report = buildDiagnosticsReport();
+  if (!report) {
+    showAlert('暂无诊断报告可复制。');
+    return;
+  }
+  clipboard.writeText(report);
+  showAlert('诊断报告已复制。');
 }
 
 function showInputDialog(message, defaultValue, callback) {
@@ -1246,6 +2601,53 @@ function showActivationPreview(profileName, profileData, callback) {
   ok.focus();
 }
 
+function getActivationPrecheck(profileData) {
+  const errors = [];
+  const warnings = [];
+  const env = (profileData && profileData.env) || {};
+  const apiFormat = (profileData && profileData.apiFormat) || {};
+  const model = getProviderModelFromConfig(profileData) || env.ANTHROPIC_MODEL || profileData.model || '';
+
+  if (!env.ANTHROPIC_BASE_URL) errors.push('缺少 ANTHROPIC_BASE_URL。');
+  if (!env.ANTHROPIC_AUTH_TOKEN) errors.push('缺少 ANTHROPIC_AUTH_TOKEN。');
+  if (!model) warnings.push('未设置模型，Claude Code 可能使用默认模型。');
+  if (apiFormat.modelCompatibility && apiFormat.modelCompatibility.compatible === false) {
+    errors.push(`模型不兼容：${apiFormat.modelCompatibility.reason || '不支持 text 输出'}`);
+  }
+  if (!apiFormat.testResult || !apiFormat.testResult.success) {
+    warnings.push('此配置未通过连接测试。');
+  } else if (apiFormat.testedAt && daysSince(apiFormat.testedAt) > 7) {
+    warnings.push('连接测试已超过 7 天，建议重新测试。');
+  }
+  if (apiFormat.modelListStatus && apiFormat.modelListStatus.state === 'unavailable') {
+    warnings.push('服务未开放模型列表，将使用当前/手动模型。');
+  }
+  if (env.ANTHROPIC_BASE_URL && /\/(?:v1\/)?(?:messages|chat\/completions)$/i.test(env.ANTHROPIC_BASE_URL)
+    && apiFormat.endpointMode !== 'direct') {
+    warnings.push('Base URL 看起来包含完整端点，激活时会自动规范化为基础地址。');
+  }
+
+  return { errors, warnings };
+}
+
+function showPrecheckDiagnostics(errors, warnings) {
+  const items = [
+    ...errors.map((value, index) => ({ label: `阻断 ${index + 1}`, value })),
+    ...warnings.map((value, index) => ({ label: `提醒 ${index + 1}`, value }))
+  ];
+  showDiagnostics({
+    summary: errors.length > 0 ? '激活前检查未通过。' : '激活前检查有提醒。',
+    items,
+    type: errors.length > 0 ? 'error' : 'warning'
+  });
+}
+
+function continueActivationAfterPrecheck(selected, jsonText, profileData) {
+  showActivationPreview(selected, profileData, (accepted) => {
+    if (accepted) performActivation(selected, jsonText, profileData);
+  });
+}
+
 function deleteCurrent() {
   const selected = ensureSelection();
   if (!selected) return;
@@ -1277,7 +2679,7 @@ function deleteCurrent() {
       if (title) title.value = '';
       document.getElementById('baseUrl').value = '';
       document.getElementById('apiKey').value = '';
-      document.getElementById('profileJson').value = '';
+      setJsonEditorValue('');
       syncStatus();
     }
   });
@@ -1289,7 +2691,7 @@ function activateCurrent() {
 
   try {
     syncJsonFromFields({ normalizeBaseUrl: true });
-    const jsonText = document.getElementById('profileJson').value;
+    const jsonText = getJsonEditorValue();
     const profileData = parseJson(jsonText);
 
     if (!profileData) {
@@ -1297,44 +2699,25 @@ function activateCurrent() {
       return;
     }
 
-    // 验证必需字段
-    if (!profileData.env || !profileData.env.ANTHROPIC_BASE_URL || !profileData.env.ANTHROPIC_AUTH_TOKEN) {
-      showAlert('配置缺少必需字段：ANTHROPIC_BASE_URL 和 ANTHROPIC_AUTH_TOKEN');
+    const precheck = getActivationPrecheck(profileData);
+    if (precheck.errors.length > 0) {
+      showPrecheckDiagnostics(precheck.errors, precheck.warnings);
+      showAlert(precheck.errors[0]);
       return;
     }
 
-    if (profileData.apiFormat && profileData.apiFormat.modelCompatibility && profileData.apiFormat.modelCompatibility.compatible === false) {
-      showAlert(`当前模型不能作为 Claude Code 对话模型使用：${profileData.apiFormat.modelCompatibility.reason || '模型不兼容'}`);
-      showDiagnostics({
-        summary: '激活已阻止：模型不兼容 Claude Code。',
-        items: [
-          { label: '模型', value: getProviderModelFromConfig(profileData) || profileData.model || '' },
-          { label: '原因', value: profileData.apiFormat.modelCompatibility.reason || '模型不兼容' },
-          { label: '建议', value: '换成 output_modalities 包含 text 的模型后重新测试。' }
-        ],
-        type: 'error'
-      });
-      return;
-    }
-
-    // 检查测试状态
-    if (!profileData.apiFormat || !profileData.apiFormat.testResult || !profileData.apiFormat.testResult.success) {
+    if (precheck.warnings.length > 0) {
+      showPrecheckDiagnostics([], precheck.warnings);
       showConfirm(
-        '此配置未通过测试或测试失败。\n\n强制激活可能导致运行时错误。\n\n是否仍要激活？',
+        `激活前有 ${precheck.warnings.length} 个提醒：\n\n${precheck.warnings.join('\n')}\n\n是否继续激活？`,
         (confirmed) => {
-          if (confirmed) {
-            showActivationPreview(selected, profileData, (accepted) => {
-              if (accepted) performActivation(selected, jsonText, profileData);
-            });
-          }
+          if (confirmed) continueActivationAfterPrecheck(selected, jsonText, profileData);
         }
       );
       return;
     }
 
-    showActivationPreview(selected, profileData, (accepted) => {
-      if (accepted) performActivation(selected, jsonText, profileData);
-    });
+    continueActivationAfterPrecheck(selected, jsonText, profileData);
 
   } catch (err) {
     console.error('activateCurrent failed:', err);
@@ -1345,6 +2728,7 @@ function activateCurrent() {
 
 function performActivation(selected, jsonText, profileData) {
   // 保存 profile 文件
+  createSnapshotFromExisting(selected, '激活前快照', jsonText);
   writeText(profilePath(selected), jsonText);
   profileTextCache.set(selected, jsonText);
   profileMetaCache.delete(selected);
@@ -1370,6 +2754,7 @@ function performActivation(selected, jsonText, profileData) {
   cachedActiveProfile = selected;
 
   rebuildProfileList(selected);
+  refreshHistoryPanel();
   syncStatus();
   showAlert(`已启用 ${selected}`);
 }
@@ -1385,6 +2770,23 @@ function refreshAll() {
   }
 
   syncStatus();
+}
+
+function resetProfileOrder() {
+  const profiles = scanProfiles({ force: true });
+  if (profiles.length <= 1) {
+    showAlert('当前配置数量不足，无需重排。');
+    return;
+  }
+
+  showConfirm('确定恢复默认排序（按名称）吗？', (confirmed) => {
+    if (!confirmed) return;
+    clearProfileOrder();
+    cachedProfiles = null;
+    clearDragState();
+    rebuildProfileList(getActiveProfile(true));
+    showAlert('已恢复默认排序。');
+  });
 }
 
 function openFolder() {
@@ -1436,35 +2838,28 @@ function getProfileRecordForExport(profileName, options = {}) {
   return { name: profileName, jsonText };
 }
 
-async function createProfilesZip(profiles) {
-  const zip = new JSZip();
-  const manifest = buildProfileManifest(profiles);
-  zip.file(EXPORT_MANIFEST_FILE, JSON.stringify(manifest, null, 2));
-
-  profiles.forEach(profile => {
-    const manifestEntry = manifest.profiles.find(item => item.name === profile.name);
-    zip.file(manifestEntry.file, profile.jsonText);
-  });
-
-  return zip.generateAsync({
-    type: 'nodebuffer',
-    compression: 'DEFLATE',
-    compressionOptions: { level: 6 }
-  });
-}
-
 async function exportProfilesToPath(profileNames, targetPath, options = {}) {
   const profiles = profileNames.map(name => getProfileRecordForExport(name, options));
   const extension = path.extname(targetPath).toLowerCase();
 
   if (profiles.length === 1 && extension === '.json') {
-    fs.writeFileSync(targetPath, profiles[0].jsonText, 'utf-8');
+    exportApi.writeTextFile(targetPath, profiles[0].jsonText);
     return { kind: 'json', count: 1, targetPath };
   }
 
   const zipPath = ensureFileExtension(targetPath, 'zip');
-  const zipBuffer = await createProfilesZip(profiles);
-  fs.writeFileSync(zipPath, zipBuffer);
+  const manifest = buildProfileManifest(profiles);
+  const zipProfiles = profiles.map(profile => {
+    const manifestEntry = manifest.profiles.find(item => item.name === profile.name);
+    return {
+      file: manifestEntry.file,
+      jsonText: profile.jsonText
+    };
+  });
+  await exportApi.writeProfilesZip(zipPath, {
+    fileName: EXPORT_MANIFEST_FILE,
+    data: manifest
+  }, zipProfiles);
   return { kind: 'zip', count: profiles.length, targetPath: zipPath };
 }
 
@@ -1517,19 +2912,6 @@ async function exportAllProfiles() {
     console.error('exportAllProfiles failed:', err);
     showAlert(`导出失败：${err.message || String(err)}`);
   }
-}
-
-function profileNameFromJsonFile(filePath) {
-  const baseName = path.basename(filePath, path.extname(filePath));
-  const match = baseName.match(/^settings\.(.+)$/i);
-  return match ? match[1] : baseName;
-}
-
-function profileNameFromZipEntry(entryName) {
-  const fileName = entryName.split('/').filter(Boolean).pop() || '';
-  const baseName = fileName.replace(/\.json$/i, '');
-  const match = baseName.match(/^settings\.(.+)$/i);
-  return match ? match[1] : baseName;
 }
 
 function normalizeImportedProfileName(name, fallback = 'imported-profile') {
@@ -1589,48 +2971,11 @@ async function readProfilesFromJsonFile(filePath) {
     return [];
   }
 
-  return [{
-    name: profileNameFromJsonFile(filePath),
-    source: path.basename(filePath),
-    jsonText: fs.readFileSync(filePath, 'utf-8')
-  }];
+  return [importApi.readJsonFile(filePath)];
 }
 
 async function readProfilesFromZipFile(filePath) {
-  const zip = await JSZip.loadAsync(fs.readFileSync(filePath));
-  const records = [];
-  const manifestFile = zip.file(EXPORT_MANIFEST_FILE);
-
-  if (manifestFile) {
-    const manifest = parseJson(await manifestFile.async('string'));
-    if (manifest && Array.isArray(manifest.profiles)) {
-      for (const profile of manifest.profiles) {
-        if (!profile || !profile.file) continue;
-        const entry = zip.file(profile.file);
-        if (!entry) continue;
-        records.push({
-          name: profile.name || profileNameFromZipEntry(profile.file),
-          source: `${path.basename(filePath)}:${profile.file}`,
-          jsonText: await entry.async('string')
-        });
-      }
-    }
-  }
-
-  if (records.length > 0) return records;
-
-  const jsonEntries = Object.values(zip.files)
-    .filter(entry => !entry.dir && /\.json$/i.test(entry.name) && entry.name !== EXPORT_MANIFEST_FILE);
-
-  for (const entry of jsonEntries) {
-    records.push({
-      name: profileNameFromZipEntry(entry.name),
-      source: `${path.basename(filePath)}:${entry.name}`,
-      jsonText: await entry.async('string')
-    });
-  }
-
-  return records;
+  return importApi.readZipFile(filePath, EXPORT_MANIFEST_FILE);
 }
 
 async function readImportFile(filePath) {
@@ -1731,7 +3076,7 @@ async function importProfileFiles(filePaths) {
             return;
           }
 
-          saveProfileFile(normalized.name, normalized.jsonText);
+          saveProfileFile(normalized.name, normalized.jsonText, { snapshot: false });
           imported.push(normalized);
         });
       } catch (err) {
@@ -1806,7 +3151,7 @@ function setupProfileDropImport() {
     setDropOverlayVisible(false);
 
     const filePaths = Array.from(event.dataTransfer.files || [])
-      .map(file => file.path)
+      .map(file => importApi.getPathForFile(file))
       .filter(Boolean);
     await importProfileFiles(filePaths);
   });
@@ -1945,64 +3290,139 @@ function sortFormatsByUrl(formats, url) {
   return [...matched, ...unmatched];
 }
 
-function fetchOpenAIModelList(baseUrl, apiKey) {
-  return new Promise((resolve) => {
-    const https = require('https');
-    const http = require('http');
-    const { URL } = require('url');
-
-    let modelsUrl = normalizeClaudeCodeBaseUrl(baseUrl).replace(/\/$/, '');
-    if (modelsUrl.endsWith('/v1')) {
-      modelsUrl += '/models';
-    } else {
-      modelsUrl += '/v1/models';
-    }
-
-    try {
-      const parsedUrl = new URL(modelsUrl);
-      const client = parsedUrl.protocol === 'https:' ? https : http;
-      const req = client.request({
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-        path: parsedUrl.pathname,
-        method: 'GET',
-        timeout: 12000,
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/json'
-        }
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => {
-          if (res.statusCode < 200 || res.statusCode >= 300) {
-            resolve(null);
-            return;
-          }
-          try {
-            const parsed = JSON.parse(data);
-            resolve(Array.isArray(parsed.data) ? parsed.data : null);
-          } catch (e) {
-            resolve(null);
-          }
-        });
-      });
-
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => {
-        req.destroy();
-        resolve(null);
-      });
-      req.end();
-    } catch (e) {
-      resolve(null);
-    }
-  });
+function uniqueStrings(values) {
+  return [...new Set(values.filter(Boolean))];
 }
 
-async function checkModelTextCompatibility(baseUrl, apiKey, model) {
-  const models = await fetchOpenAIModelList(baseUrl, apiKey);
-  if (!models) return { known: false, compatible: true };
+function stripModelEndpoint(url) {
+  return String(url || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/(?:v1\/)?(?:chat\/completions|messages|models)$/i, '');
+}
+
+function getModelListUrls(baseUrl, endpointMode = 'auto') {
+  const raw = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!raw) return [];
+
+  const base = endpointMode === 'direct'
+    ? stripModelEndpoint(raw)
+    : stripModelEndpoint(normalizeClaudeCodeBaseUrl(raw, endpointMode));
+
+  const urls = [];
+  if (/\/(?:v1\/)?models$/i.test(raw)) urls.push(raw);
+  if (base.endsWith('/v1')) {
+    urls.push(`${base}/models`);
+  } else {
+    urls.push(`${base}/v1/models`);
+    urls.push(`${base}/models`);
+  }
+  return uniqueStrings(urls);
+}
+
+function getModelListHeaderSets(apiKey, endpointMode = 'auto') {
+  const bearerHeaders = {
+    'Authorization': `Bearer ${apiKey}`,
+    'Content-Type': 'application/json'
+  };
+  const anthropicHeaders = {
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+    'Content-Type': 'application/json'
+  };
+
+  if (endpointMode === 'anthropic') return [anthropicHeaders, bearerHeaders];
+  return [bearerHeaders, anthropicHeaders];
+}
+
+function normalizeModelInfo(item) {
+  if (typeof item === 'string') {
+    const id = item.trim();
+    return id ? { id, raw: item } : null;
+  }
+  if (!item || typeof item !== 'object') return null;
+
+  const id = item.id || item.name || item.model || item.model_id;
+  if (!id) return null;
+  return {
+    id: String(id).trim(),
+    name: item.display_name || item.name || String(id).trim(),
+    owned_by: item.owned_by || item.owner || item.provider || '',
+    output_modalities: Array.isArray(item.output_modalities) ? item.output_modalities : null,
+    raw: item
+  };
+}
+
+function extractModelsFromResponse(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch (error) {
+    return [];
+  }
+
+  const list = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed.data)
+      ? parsed.data
+      : Array.isArray(parsed.models)
+        ? parsed.models
+        : Array.isArray(parsed.model_list)
+          ? parsed.model_list
+          : [];
+
+  const seen = new Set();
+  return list
+    .map(normalizeModelInfo)
+    .filter(model => {
+      if (!model || !model.id || seen.has(model.id)) return false;
+      seen.add(model.id);
+      return true;
+    })
+    .sort((a, b) => a.id.localeCompare(b.id, 'zh-Hans-CN', { sensitivity: 'base' }));
+}
+
+async function fetchAvailableModelList(baseUrl, apiKey, endpointMode = 'auto') {
+  const urls = getModelListUrls(baseUrl, endpointMode);
+  const headerSets = getModelListHeaderSets(apiKey, endpointMode);
+  const attempts = [];
+  const merged = [];
+  const seen = new Set();
+
+  for (const url of urls) {
+    for (const headers of headerSets) {
+      const result = await net.requestJson({
+        url,
+        method: 'GET',
+        timeout: 12000,
+        headers
+      });
+      attempts.push({
+        url,
+        statusCode: result.statusCode,
+        success: result.success,
+        error: result.error || ''
+      });
+      if (!result.success) continue;
+
+      extractModelsFromResponse(result.data).forEach(model => {
+        if (seen.has(model.id)) return;
+        seen.add(model.id);
+        merged.push(model);
+      });
+
+      if (merged.length > 0) {
+        return { models: merged, attempts };
+      }
+    }
+  }
+
+  return { models: merged, attempts };
+}
+
+async function checkModelTextCompatibility(baseUrl, apiKey, model, endpointMode = 'auto') {
+  const { models } = await fetchAvailableModelList(baseUrl, apiKey, endpointMode);
+  if (!models || models.length === 0) return { known: false, compatible: true };
 
   const metadata = models.find(item => item && item.id === model);
   if (!metadata) {
@@ -2025,123 +3445,79 @@ async function checkModelTextCompatibility(baseUrl, apiKey, model) {
 }
 
 function getModelFromConfig() {
-  const parsed = parseJson(document.getElementById('profileJson').value);
-  let model = 'claude-sonnet-4-6';
-  if (parsed) {
-    if (parsed.env && parsed.env.ANTHROPIC_MODEL) {
-      model = parsed.env.ANTHROPIC_MODEL;
-    } else if (parsed.model) {
-      const alias = parsed.model.replace(/\[.*\]/, '');
-      const aliasMap = { opus: 'claude-opus-4-6', sonnet: 'claude-sonnet-4-6', haiku: 'claude-haiku-4-5-20251001' };
-      if (aliasMap[alias]) model = aliasMap[alias];
+  const parsed = parseJson(getJsonEditorValue());
+  if (!parsed) return 'claude-sonnet-4-6';
+
+  if (parsed.apiFormat && parsed.apiFormat.providerModel) {
+    const pm = String(parsed.apiFormat.providerModel).trim();
+    if (pm) return pm;
+  }
+
+  if (parsed.env && parsed.env.ANTHROPIC_MODEL) {
+    const envModel = String(parsed.env.ANTHROPIC_MODEL).trim();
+    if (envModel) return envModel;
+  }
+
+  if (parsed.model) {
+    const raw = String(parsed.model).trim();
+    if (raw) {
+      const aliasKey = raw.replace(/\[.*\]/, '');
+      if (CLAUDE_CODE_MODEL_ALIASES.has(raw) || CLAUDE_CODE_MODEL_ALIASES.has(aliasKey)) {
+        return 'claude-sonnet-4-6';
+      }
+      return raw;
     }
   }
-  return model;
+
+  return 'claude-sonnet-4-6';
 }
 
-function testApiFormat(baseUrl, apiKey, model, format) {
-  return new Promise((resolve) => {
-    const https = require('https');
-    const http = require('http');
-    const { URL } = require('url');
+async function testApiFormat(baseUrl, apiKey, model, format, endpointMode = 'auto') {
+  let finalUrl = baseUrl.replace(/\/$/, '');
 
-    // 处理已经包含端点的 Base URL
-    let finalUrl = baseUrl.replace(/\/$/, '');
-
-    // 检查 Base URL 是否已经包含了 /v1/chat/completions 或 /v1/messages 等端点
+  if (endpointMode === 'direct') {
+    // 直连：Base URL 本身即完整端点，不追加任何路径
+  } else if (endpointMode === 'anthropic') {
+    if (!/\/v1\/messages$/i.test(finalUrl)) finalUrl = finalUrl + '/v1/messages';
+  } else if (endpointMode === 'openai') {
+    if (!/\/v1\/chat\/completions$/i.test(finalUrl)) finalUrl = finalUrl + '/v1/chat/completions';
+  } else {
+    // auto：检查是否已经包含常见端点
     const commonEndpoints = ['/v1/chat/completions', '/v1/messages', '/chat/completions', '/messages'];
     const hasEndpoint = commonEndpoints.some(ep => finalUrl.endsWith(ep));
+    if (!hasEndpoint) finalUrl = finalUrl + format.endpoint;
+  }
 
-    if (!hasEndpoint) {
-      // 如果没有端点，则追加
-      finalUrl = finalUrl + format.endpoint;
-    }
+  const postData = JSON.stringify(format.requestBody(model));
+  const headers = {
+    'Content-Type': 'application/json'
+  };
 
-    const url = finalUrl;
+  // 设置认证头
+  if (format.authPrefix) {
+    headers[format.authHeader] = format.authPrefix + apiKey;
+  } else {
+    headers[format.authHeader] = apiKey;
+  }
 
-    try {
-      const parsedUrl = new URL(url);
-      const client = parsedUrl.protocol === 'https:' ? https : http;
+  // 添加额外的请求头
+  Object.assign(headers, format.additionalHeaders);
 
-      const postData = JSON.stringify(format.requestBody(model));
-
-      const headers = {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
-      };
-
-      // 设置认证头
-      if (format.authPrefix) {
-        headers[format.authHeader] = format.authPrefix + apiKey;
-      } else {
-        headers[format.authHeader] = apiKey;
-      }
-
-      // 添加额外的请求头
-      Object.assign(headers, format.additionalHeaders);
-
-      const options = {
-        hostname: parsedUrl.hostname,
-        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-        path: parsedUrl.pathname,
-        method: 'POST',
-        timeout: 30000,
-        headers: headers
-      };
-
-      const startTime = Date.now();
-
-      const req = client.request(options, (res) => {
-        let data = '';
-        res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => {
-          const elapsed = Date.now() - startTime;
-          const success = res.statusCode === 200;
-          resolve({
-            success: success,
-            statusCode: res.statusCode,
-            elapsed: elapsed,
-            url: url,
-            error: success ? null : data
-          });
-        });
-      });
-
-      req.on('error', (err) => {
-        const elapsed = Date.now() - startTime;
-        resolve({
-          success: false,
-          statusCode: 0,
-          elapsed: elapsed,
-          url: url,
-          error: err.message
-        });
-      });
-
-      req.on('timeout', () => {
-        req.destroy();
-        const elapsed = Date.now() - startTime;
-        resolve({
-          success: false,
-          statusCode: 0,
-          elapsed: elapsed,
-          url: url,
-          error: '连接超时'
-        });
-      });
-
-      req.write(postData);
-      req.end();
-    } catch (err) {
-      resolve({
-        success: false,
-        statusCode: 0,
-        elapsed: 0,
-        url: url,
-        error: err.message
-      });
-    }
+  const result = await net.requestJson({
+    url: finalUrl,
+    method: 'POST',
+    timeout: 30000,
+    headers,
+    body: postData
   });
+  const success = result.statusCode === 200;
+  return {
+    success,
+    statusCode: result.statusCode,
+    elapsed: result.elapsed,
+    url: finalUrl,
+    error: success ? null : (result.error || result.data || '请求失败')
+  };
 }
 
 function showEnhancedTestProgress(formats) {
@@ -2174,9 +3550,175 @@ function hideEnhancedTestProgress() {
   }
 }
 
+function setModelFetchLoading(isLoading) {
+  const button = document.getElementById('fetchModelsBtn');
+  const input = document.getElementById('modelSelect');
+  const applyButton = document.getElementById('applyModelBtn');
+  if (button) {
+    button.disabled = isLoading;
+    button.innerText = isLoading ? '获取中...' : '获取模型';
+  }
+  if (input) input.disabled = isLoading;
+  if (applyButton) applyButton.disabled = isLoading;
+}
+
+function applySelectedModelToJson(modelId) {
+  if (!modelId) return;
+  const config = parseJson(getJsonEditorValue()) || {};
+  if (!config.env) config.env = {};
+  if (!config.apiFormat) config.apiFormat = {};
+
+  config.apiFormat.providerModel = modelId;
+  config.env.ANTHROPIC_MODEL = modelId;
+
+  if (!config.model) {
+    config.model = CLAUDE_CODE_FALLBACK_MODEL;
+  } else if (!isClaudeCodeModel(config.model)) {
+    config.model = modelId;
+  }
+
+  const metadata = cachedAvailableModels.find(model => model.id === modelId);
+  if (metadata && Array.isArray(metadata.output_modalities)) {
+    config.apiFormat.modelCompatibility = {
+      known: true,
+      compatible: metadata.output_modalities.includes('text'),
+      reason: metadata.output_modalities.includes('text')
+        ? undefined
+        : `模型 ${modelId} 的输出模态是 ${metadata.output_modalities.join(', ')}，不是 Claude Code 需要的 text。`
+    };
+    if (!config.apiFormat.modelCompatibility.reason) {
+      delete config.apiFormat.modelCompatibility.reason;
+    }
+  }
+
+  rememberModelForProvider(config.env.ANTHROPIC_BASE_URL || '', modelId);
+  setJsonEditorValue(JSON.stringify(config, null, 2));
+  syncFieldsFromJson();
+  setJsonStatus(`已写入模型：${modelId}`, 'success');
+  setModelHint(`已选择模型：${modelId}`);
+}
+
+function applyModelInputToJson() {
+  const input = document.getElementById('modelSelect');
+  const modelId = input ? input.value.trim() : '';
+  if (!modelId) {
+    setModelHint('请先输入模型 ID。', 'error');
+    showAlert('请先输入模型 ID。');
+    return;
+  }
+
+  applySelectedModelToJson(modelId);
+  renderModelOptions(cachedAvailableModels, modelId);
+}
+
+async function fetchModelsForCurrentConfig() {
+  clearDiagnostics();
+  const token = ++pendingModelListToken;
+  normalizeBaseUrlField({ notify: true });
+  syncJsonFromFields();
+
+  const baseUrl = document.getElementById('baseUrl').value.trim();
+  const apiKey = document.getElementById('apiKey').value.trim();
+  const endpointMode = getCurrentEndpointMode();
+
+  if (!baseUrl || !apiKey) {
+    showAlert('请先填写基础地址和 API 密钥。');
+    setModelHint('缺少 Base URL 或认证令牌。', 'error');
+    return;
+  }
+
+  let preserveModelHint = false;
+  try {
+    setModelFetchLoading(true);
+    setModelHint('正在获取模型列表...');
+    const { models, attempts } = await fetchAvailableModelList(baseUrl, apiKey, endpointMode);
+    if (token !== pendingModelListToken) return;
+
+    cachedAvailableModels = models;
+    const currentModel = getProviderModelFromConfig(parseJson(getJsonEditorValue()) || {});
+    renderModelOptions(cachedAvailableModels, currentModel);
+
+    if (models.length === 0) {
+      const first = attempts.find(attempt => attempt.statusCode || attempt.error) || attempts[0];
+      preserveModelHint = true;
+      const listUnavailable = isModelListDiscoveryUnavailable(attempts);
+      if (listUnavailable) {
+        saveModelListStatusToConfig({
+          state: 'unavailable',
+          statusCode: first ? first.statusCode || 0 : 0,
+          endpoint: first ? first.url : '',
+          reason: '服务未开放模型列表接口'
+        });
+        showDiagnostics({
+          summary: '该服务未开放模型列表接口。',
+          items: [
+            { label: '尝试端点', value: first ? first.url : '' },
+            { label: 'HTTP 状态', value: first ? String(first.statusCode || 0) : '' },
+            { label: '当前模型', value: currentModel || '未设置' },
+            { label: '处理方式', value: currentModel ? '已保留当前模型，也可以手动输入模型 ID 后应用。' : '请手动输入模型 ID 后应用。' }
+          ],
+          type: 'warning'
+        });
+        setModelHint(
+          currentModel
+            ? '服务未开放模型列表，已保留当前模型；也可以手动输入模型 ID。'
+            : '服务未开放模型列表，请手动输入模型 ID。',
+          'warning'
+        );
+        showAlert(currentModel
+          ? '该服务未开放模型列表，已保留当前模型。'
+          : '该服务未开放模型列表，请手动输入模型 ID。');
+        return;
+      }
+      saveModelListStatusToConfig({
+        state: 'failed',
+        statusCode: first ? first.statusCode || 0 : 0,
+        endpoint: first ? first.url : '',
+        reason: first ? (first.error || '模型列表为空或响应格式不支持') : '模型列表为空或响应格式不支持'
+      });
+      showDiagnostics({
+        summary: '未能获取模型列表。',
+        items: [
+          { label: '尝试端点', value: first ? first.url : '' },
+          { label: 'HTTP 状态', value: first ? String(first.statusCode || 0) : '' },
+          { label: '错误摘要', value: first ? (first.error || '模型列表为空或响应格式不支持') : '模型列表为空或响应格式不支持' },
+          { label: '建议', value: '确认该服务是否支持 /v1/models，或切换端点拼接模式后重试。' }
+        ],
+        type: 'error'
+      });
+      setModelHint('没有获取到可用模型。', 'error');
+      showAlert('获取模型失败，已生成诊断。');
+      return;
+    }
+
+    saveModelListStatusToConfig({
+      state: 'available',
+      count: models.length
+    });
+    setModelHint(`已获取 ${models.length} 个模型。`);
+    showAlert(`已获取 ${models.length} 个模型。`);
+  } catch (err) {
+    preserveModelHint = true;
+    console.error('fetchModelsForCurrentConfig failed:', err);
+    setModelHint(`获取失败：${err.message || String(err)}`, 'error');
+    showAlert(`获取模型失败：${err.message || String(err)}`);
+  } finally {
+    if (token === pendingModelListToken) {
+      setModelFetchLoading(false);
+      if (preserveModelHint) {
+        const currentModel = getProviderModelFromConfig(parseJson(getJsonEditorValue()) || {});
+        renderModelOptions(cachedAvailableModels, currentModel);
+      } else {
+        updateModelPickerFromConfig();
+      }
+    }
+  }
+}
+
 function saveApiFormatToConfig(format, result, compatibility = null) {
-  const jsonText = document.getElementById('profileJson').value;
+  const jsonText = getJsonEditorValue();
   const config = parseJson(jsonText) || {};
+  const previousApiFormat = config.apiFormat || {};
 
   config.apiFormat = {
     id: format.id,
@@ -2184,6 +3726,7 @@ function saveApiFormatToConfig(format, result, compatibility = null) {
     endpoint: format.endpoint,
     authHeader: format.authHeader,
     authPrefix: format.authPrefix,
+    endpointMode: getCurrentEndpointMode(),
     testedAt: new Date().toISOString(),
     testResult: {
       success: result.success,
@@ -2191,24 +3734,37 @@ function saveApiFormatToConfig(format, result, compatibility = null) {
       elapsed: result.elapsed
     }
   };
+  if (previousApiFormat.providerModel) {
+    config.apiFormat.providerModel = previousApiFormat.providerModel;
+    if (config.env && config.env.ANTHROPIC_BASE_URL) {
+      rememberModelForProvider(config.env.ANTHROPIC_BASE_URL, previousApiFormat.providerModel);
+    }
+  }
+  ['providerTemplate', 'providerTemplateName', 'knownModels', 'modelListStatus', 'scenarioTag', 'scenarioName'].forEach(key => {
+    if (previousApiFormat[key] !== undefined) {
+      config.apiFormat[key] = previousApiFormat[key];
+    }
+  });
+  const currentTemplate = detectProviderTemplate(config);
+  if (currentTemplate && currentTemplate.id !== 'custom') {
+    config.apiFormat.providerTemplate = currentTemplate.id;
+    config.apiFormat.providerTemplateName = currentTemplate.name;
+  }
   if (compatibility) {
     config.apiFormat.modelCompatibility = compatibility;
+  } else if (previousApiFormat.modelCompatibility) {
+    config.apiFormat.modelCompatibility = previousApiFormat.modelCompatibility;
   }
 
   const updatedJson = JSON.stringify(config, null, 2);
-  document.getElementById('profileJson').value = updatedJson;
+  setJsonEditorValue(updatedJson);
   syncFieldsFromJson();
 
-  // 保存到文件并刷新侧边栏
-  const selected = selectedProfile;
-  if (selected) {
-    saveProfileFile(selected, updatedJson);
-    rebuildProfileList(getActiveProfile());
-  }
+  setJsonStatus('测试结果已写入编辑器，点击"保存"按钮以持久化', 'success');
 }
 
 function saveModelCompatibilityToConfig(compatibility) {
-  const jsonText = document.getElementById('profileJson').value;
+  const jsonText = getJsonEditorValue();
   const config = parseJson(jsonText) || {};
   if (!config.apiFormat) config.apiFormat = {};
   config.apiFormat.modelCompatibility = compatibility;
@@ -2220,13 +3776,10 @@ function saveModelCompatibilityToConfig(compatibility) {
     };
   }
   const updatedJson = JSON.stringify(config, null, 2);
-  document.getElementById('profileJson').value = updatedJson;
+  setJsonEditorValue(updatedJson);
   syncFieldsFromJson();
 
-  if (selectedProfile) {
-    saveProfileFile(selectedProfile, updatedJson);
-    rebuildProfileList(getActiveProfile());
-  }
+  setJsonStatus('兼容性检查结果已写入编辑器，点击"保存"按钮以持久化', compatibility.compatible ? 'success' : 'error');
 }
 
 function showTestFailureDialog(testResults) {
@@ -2263,12 +3816,24 @@ function testCurrent() {
     return;
   }
 
+  // 检查当前配置是否为空（只有默认模板，没有实际配置）
+  const editorJson = parseJson(getJsonEditorValue());
+  const hasRealConfig = editorJson && editorJson.env &&
+    (editorJson.env.ANTHROPIC_BASE_URL || editorJson.env.ANTHROPIC_AUTH_TOKEN);
+
+  // 如果配置为空且名称与选中配置不同，提示用户先保存
+  if (!hasRealConfig && testingProfile && testingProfile !== currentLoadedProfile) {
+    showAlert('当前编辑的配置与选中配置不同，请先保存配置后再测试。');
+    return;
+  }
+
   document.getElementById('footerHint').innerText = '状态：正在测试连接...';
 
   // 异步顺序测试
   (async () => {
     const model = getModelFromConfig();
-    const compatibility = await checkModelTextCompatibility(baseUrl, apiKey, model);
+    const endpointMode = getCurrentEndpointMode();
+    const compatibility = await checkModelTextCompatibility(baseUrl, apiKey, model, endpointMode);
     if (testToken !== pendingApiTestToken || testingProfile !== selectedProfile) return;
     if (!compatibility.compatible) {
       document.getElementById('footerHint').innerText = `状态：已激活 ${getActiveProfile() || 'unknown'}`;
@@ -2295,7 +3860,7 @@ function testCurrent() {
 
     for (const format of sortedFormats) {
       updateTestProgress(format.id, 'testing');
-      const result = await testApiFormat(baseUrl, apiKey, model, format);
+      const result = await testApiFormat(baseUrl, apiKey, model, format, endpointMode);
       if (testToken !== pendingApiTestToken || testingProfile !== selectedProfile) return;
       testResults.push({ format, result });
 
@@ -2354,6 +3919,7 @@ window.addEventListener('DOMContentLoaded', () => {
   // 加载保存的主题
   const savedTheme = localStorage.getItem('clave-theme') || 'azure';
   setTheme(savedTheme);
+  setupCustomSelects();
 
   const active = getActiveProfile();
   selectedProfile = active || '';
@@ -2371,6 +3937,8 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 
   syncStatus();
+  renderRuntimeInfo();
+  refreshHistoryPanel();
   setupProfileDropImport();
   setupProfileMoreMenu();
 
@@ -2404,23 +3972,69 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   baseUrlInput.addEventListener('input', () => {
     setBaseUrlHint();
+    resetAvailableModels('连接信息已变化，请重新获取模型列表。');
     syncJsonFromFields();
   });
   baseUrlInput.addEventListener('blur', () => {
     normalizeBaseUrlField({ notify: true });
+    resetAvailableModels('连接信息已变化，请重新获取模型列表。');
     syncJsonFromFields();
   });
   baseUrlInput.addEventListener('change', () => {
     normalizeBaseUrlField({ notify: true });
+    resetAvailableModels('连接信息已变化，请重新获取模型列表。');
     syncJsonFromFields();
   });
-  document.getElementById('apiKey').addEventListener('keyup', syncJsonFromFields);
+  document.getElementById('apiKey').addEventListener('keyup', () => {
+    resetAvailableModels('认证令牌已变化，请重新获取模型列表。');
+    syncJsonFromFields();
+  });
+  const endpointModeSelect = document.getElementById('endpointMode');
+  if (endpointModeSelect) {
+    endpointModeSelect.addEventListener('change', () => {
+      setBaseUrlHint();
+      resetAvailableModels('端点模式已变化，请重新获取模型列表。');
+      syncJsonFromFields();
+    });
+  }
+  const providerTemplateSelect = document.getElementById('providerTemplate');
+  if (providerTemplateSelect) {
+    providerTemplateSelect.addEventListener('change', () => {
+      updateProviderTemplateHint(getTemplateById(providerTemplateSelect.value));
+    });
+  }
+  const modelSelect = document.getElementById('modelSelect');
+  if (modelSelect) {
+    modelSelect.addEventListener('change', () => {
+      if (modelSelect.value.trim()) applyModelInputToJson();
+    });
+    modelSelect.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyModelInputToJson();
+      }
+    });
+  }
+  ['toggleThinking', 'effortLevel', 'permissionsMode', 'scenarioTag'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', () => syncJsonFromFields());
+  });
   const jsonEditor = document.getElementById('profileJson');
   jsonEditor.addEventListener('input', () => {
-    clearJsonBracketMarkers();
+    activeJsonBracketMatch = null;
     validateJsonEditor();
     syncFieldsFromJson();
   });
+  jsonEditor.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      document.execCommand('insertText', false, '  ');
+    }
+  });
   jsonEditor.addEventListener('mouseup', markMatchingJsonBracket);
-  jsonEditor.addEventListener('scroll', renderActiveJsonBracketMarkers);
+  jsonEditor.addEventListener('keyup', (e) => {
+    if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(e.key)) {
+      markMatchingJsonBracket();
+    }
+  });
 });

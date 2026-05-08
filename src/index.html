@@ -59,6 +59,9 @@
             <button class="btn-icon" onclick="refreshAll()" title="刷新列表">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/></svg>
             </button>
+            <button class="btn-icon" onclick="resetProfileOrder()" title="恢复默认排序">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6h11"/><path d="M3 12h18"/><path d="M3 18h11"/><path d="M18 6v4"/><path d="M16 8h4"/></svg>
+            </button>
             <button class="btn-icon" onclick="openFolder()" title="打开配置文件目录">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
             </button>
@@ -93,20 +96,179 @@
         </header>
 
         <div class="editor-scroll-area">
+          <section class="overview-grid single">
+            <div class="overview-card health-overview">
+              <div class="panel-head">
+                <div>
+                  <div class="input-group-label">配置健康</div>
+                  <div id="healthSummary" class="panel-subtitle">等待配置加载</div>
+                </div>
+                <div id="healthScore" class="health-score">--</div>
+              </div>
+              <div id="healthChecks" class="health-checks"></div>
+            </div>
+          </section>
+
           <div class="input-card">
             <div class="input-group" style="display:flex; flex-direction:column; gap:8px;">
-              <label class="input-group-label">配置名称 (Profile Name)</label>
+              <label class="input-group-label">
+                服务商模板 (Provider Template)
+                <span class="info-tip" data-tip="模板会填入常见 Base URL、端点模式、API 格式和已知模型；不会覆盖你的 Token。" tabindex="0" aria-label="提示">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                </span>
+              </label>
+              <div class="inline-controls">
+                <input id="providerTemplate" type="hidden" value="custom" />
+                <div class="custom-select" data-target="providerTemplate">
+                  <button type="button" class="custom-select-button">自定义服务</button>
+                  <div class="custom-select-menu hidden" role="listbox">
+                    <button type="button" data-value="custom">自定义服务</button>
+                    <button type="button" data-value="mimo">Mimo / 小米 Mimo</button>
+                    <button type="button" data-value="minimax">MiniMax</button>
+                    <button type="button" data-value="volcengine">火山引擎 Ark</button>
+                    <button type="button" data-value="sensenova">商汤日日新</button>
+                    <button type="button" data-value="openai-compatible">OpenAI 兼容</button>
+                    <button type="button" data-value="anthropic">Anthropic 原生</button>
+                    <button type="button" data-value="iflytek">讯飞星火</button>
+                  </div>
+                </div>
+                <button class="btn-action btn-secondary btn-small" type="button" onclick="applySelectedProviderTemplate()">应用模板</button>
+              </div>
+              <div id="providerTemplateHint" class="input-hint hidden"></div>
+            </div>
+
+            <div class="input-group" style="display:flex; flex-direction:column; gap:8px;">
+              <label class="input-group-label">
+                配置名称 (Profile Name)
+                <span class="info-tip" data-tip="名称会用于 settings.&lt;name&gt;.json 文件名，不能包含 / : * ? &quot; &lt; &gt; | \\，首尾不能有空格。" tabindex="0" aria-label="提示">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                </span>
+              </label>
               <input id="profileName" class="input-field" type="text" placeholder="例如：商汤U1" />
-              <div id="profileNameHint" class="input-hint">名称会用于 settings.&lt;name&gt;.json 文件名。</div>
+              <div id="profileNameHint" class="input-hint hidden"></div>
             </div>
             <div class="input-group" style="display:flex; flex-direction:column; gap:8px;">
-              <label class="input-group-label">基础地址 (Endpoint URL)</label>
+              <label class="input-group-label">
+                基础地址 (Endpoint URL)
+                <span class="info-tip" data-tip="填写 /v1/messages 前面的地址，Clave 会自动移除完整端点。直连模式下保留原样。" tabindex="0" aria-label="提示">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                </span>
+              </label>
               <input id="baseUrl" class="input-field" type="text" placeholder="https://api.anthropic.com" />
-              <div id="baseUrlHint" class="input-hint">填写 /v1/messages 前面的地址，Clave 会自动移除完整端点。</div>
+              <div id="baseUrlHint" class="input-hint hidden"></div>
+            </div>
+            <div class="input-group" style="display:flex; flex-direction:column; gap:8px;">
+              <label class="input-group-label">
+                端点拼接模式 (Endpoint Mode)
+                <span class="info-tip" data-tip="自动检测：依据 Base URL 和 API 格式决定是否追加 /v1/messages 或 /v1/chat/completions。Anthropic / OpenAI：强制使用对应端点。直连：Base URL 本身即完整端点，不拼接任何路径（如 iflytek 完整路径）。" tabindex="0" aria-label="提示">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                </span>
+              </label>
+              <input id="endpointMode" type="hidden" value="auto" />
+              <div class="custom-select" data-target="endpointMode">
+                <button type="button" class="custom-select-button">自动检测（推荐）</button>
+                <div class="custom-select-menu hidden" role="listbox">
+                  <button type="button" data-value="auto">自动检测（推荐）</button>
+                  <button type="button" data-value="anthropic">Anthropic（强制 /v1/messages）</button>
+                  <button type="button" data-value="openai">OpenAI（强制 /v1/chat/completions）</button>
+                  <button type="button" data-value="direct">直连（Base URL 即完整端点，不拼接）</button>
+                </div>
+              </div>
             </div>
             <div class="input-group" style="display:flex; flex-direction:column; gap:8px;">
               <label class="input-group-label">认证令牌 (Auth Token)</label>
               <input id="apiKey" class="input-field" type="password" placeholder="sk-ant-..." />
+            </div>
+
+            <div class="model-picker">
+              <div class="model-picker-head">
+                <label class="input-group-label" for="modelSelect">
+                  可用模型
+                  <span class="info-tip" data-tip="使用当前 Base URL 和认证令牌读取 /v1/models。选择模型后会写入 apiFormat.providerModel 与 env.ANTHROPIC_MODEL。" tabindex="0" aria-label="提示">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                  </span>
+                </label>
+                <button id="fetchModelsBtn" class="btn-action btn-secondary btn-small" type="button" onclick="fetchModelsForCurrentConfig()">获取模型</button>
+              </div>
+              <div class="model-picker-controls">
+                <input id="modelSelect" class="input-field model-select" type="text" list="modelOptions" placeholder="先获取模型列表" autocomplete="off" spellcheck="false" />
+                <datalist id="modelOptions"></datalist>
+                <button id="applyModelBtn" class="btn-action btn-secondary btn-small" type="button" onclick="applyModelInputToJson()">应用</button>
+              </div>
+              <div id="modelHint" class="input-hint hidden"></div>
+            </div>
+
+            <div class="quick-settings">
+              <div class="quick-setting-row">
+                <label class="quick-setting-label" for="toggleThinking">
+                  扩展思考
+                  <span class="info-tip" data-tip="alwaysThinkingEnabled：打开后每轮对话都会触发扩展思考，不用每次手动开启。" tabindex="0" aria-label="提示">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                  </span>
+                </label>
+                <label class="toggle-switch" title="切换扩展思考">
+                  <input id="toggleThinking" type="checkbox" />
+                  <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                </label>
+              </div>
+              <div class="quick-setting-row">
+                <label class="quick-setting-label" for="effortLevel">
+                  思考强度
+                  <span class="info-tip" data-tip="effortLevel：推理用多少算力。max 最深，low 最快。影响响应时间与 token 消耗。" tabindex="0" aria-label="提示">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                  </span>
+                </label>
+                <input id="effortLevel" type="hidden" value="medium" />
+                <div class="custom-select compact" data-target="effortLevel">
+                  <button type="button" class="custom-select-button">medium</button>
+                  <div class="custom-select-menu hidden" role="listbox">
+                    <button type="button" data-value="low">low</button>
+                    <button type="button" data-value="medium">medium</button>
+                    <button type="button" data-value="high">high</button>
+                    <button type="button" data-value="max">max</button>
+                  </div>
+                </div>
+              </div>
+              <div class="quick-setting-row">
+                <label class="quick-setting-label" for="permissionsMode">
+                  权限模式
+                  <span class="info-tip" data-tip="permissions.defaultMode：default=每次弹提示；acceptEdits=自动同意文件编辑；plan=规划模式（改动前先批准）；auto=按规则分类放行；dontAsk=已废弃；bypassPermissions=完全绕过（危险）。" tabindex="0" aria-label="提示">
+                  <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                  </span>
+                </label>
+                <input id="permissionsMode" type="hidden" value="default" />
+                <div class="custom-select compact" data-target="permissionsMode">
+                  <button type="button" class="custom-select-button">default</button>
+                  <div class="custom-select-menu hidden" role="listbox">
+                    <button type="button" data-value="default">default</button>
+                    <button type="button" data-value="acceptEdits">acceptEdits</button>
+                    <button type="button" data-value="plan">plan</button>
+                    <button type="button" data-value="auto">auto</button>
+                    <button type="button" data-value="bypassPermissions">bypassPermissions</button>
+                    <button type="button" data-value="dontAsk">dontAsk（已废弃）</button>
+                  </div>
+                </div>
+              </div>
+              <div class="quick-setting-row">
+                <label class="quick-setting-label" for="scenarioTag">
+                  场景标签
+                  <span class="info-tip" data-tip="给配置标记使用场景，方便切换：日常编码、深度推理、便宜快速、备用线路或国内线路。" tabindex="0" aria-label="提示">
+                    <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="8" r="6.5"/><line x1="8" y1="7" x2="8" y2="11.5"/><circle cx="8" cy="4.6" r="0.6" fill="currentColor" stroke="none"/></svg>
+                  </span>
+                </label>
+                <input id="scenarioTag" type="hidden" value="" />
+                <div class="custom-select compact" data-target="scenarioTag">
+                  <button type="button" class="custom-select-button">未标记</button>
+                  <div class="custom-select-menu hidden" role="listbox">
+                    <button type="button" data-value="">未标记</button>
+                    <button type="button" data-value="daily-coding">日常编码</button>
+                    <button type="button" data-value="deep-reasoning">深度推理</button>
+                    <button type="button" data-value="fast-cheap">便宜快速</button>
+                    <button type="button" data-value="backup-route">备用线路</button>
+                    <button type="button" data-value="cn-route">国内线路</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -116,9 +278,36 @@
                 <div class="input-group-label">连接诊断</div>
                 <div id="diagnosticSummary" class="panel-subtitle">等待测试结果</div>
               </div>
-              <button class="btn-action btn-secondary btn-small" onclick="clearDiagnostics()">清除</button>
+              <div class="toolbar-actions">
+                <button class="btn-action btn-secondary btn-small" onclick="copyDiagnosticsReport()">复制报告</button>
+                <button class="btn-action btn-secondary btn-small" onclick="clearDiagnostics()">清除</button>
+              </div>
             </div>
             <div id="diagnosticDetails" class="diagnostic-details"></div>
+          </section>
+
+          <section class="history-panel">
+            <div class="panel-head">
+              <div>
+                <div class="input-group-label">配置快照</div>
+                <div id="historySummary" class="panel-subtitle">手动保存快照，也会在覆盖保存前自动留档</div>
+              </div>
+              <div class="toolbar-actions">
+                <button class="btn-action btn-secondary btn-small" type="button" onclick="saveManualSnapshot()">保存快照</button>
+                <button class="btn-action btn-secondary btn-small" type="button" onclick="refreshHistoryPanel()">刷新</button>
+              </div>
+            </div>
+            <div class="history-controls">
+              <input id="historySelect" type="hidden" value="" />
+              <div class="custom-select history-select" data-target="historySelect">
+                <button type="button" class="custom-select-button">暂无快照</button>
+                <div class="custom-select-menu hidden" role="listbox">
+                  <button type="button" data-value="">暂无快照</button>
+                </div>
+              </div>
+              <button class="btn-action btn-secondary btn-small" type="button" onclick="showSelectedHistoryDiff()">查看差异</button>
+              <button class="btn-action btn-secondary btn-small" type="button" onclick="restoreSelectedHistorySnapshot()">恢复</button>
+            </div>
           </section>
 
           <div class="json-panel">
@@ -133,8 +322,7 @@
               </div>
             </div>
             <div class="json-editor-shell">
-              <textarea id="profileJson" class="json-textarea" spellcheck="false"></textarea>
-              <div id="jsonBracketMarkers" class="bracket-marker-layer" aria-hidden="true"></div>
+              <pre id="profileJson" class="json-textarea" contenteditable="plaintext-only" spellcheck="false"></pre>
             </div>
           </div>
         </div>

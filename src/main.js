@@ -28,8 +28,12 @@ function createWindow() {
     show: false, // 先隐藏，加载完再显示
     backgroundColor: isWindows ? '#F5F5F7' : undefined,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      preload: path.join(__dirname, 'preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: false,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       backgroundThrottling: false
     },
     icon: path.join(__dirname, '../assets/icons/icon.png')
@@ -49,6 +53,12 @@ function createWindow() {
   });
 
   win.loadFile('src/index.html');
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  win.webContents.on('will-navigate', (event, targetUrl) => {
+    if (targetUrl !== win.webContents.getURL()) {
+      event.preventDefault();
+    }
+  });
 
   // 页面加载完成后注入平台信息
   win.webContents.on('did-finish-load', () => {
@@ -123,7 +133,6 @@ function createWindow() {
         {
           label: '关于',
           click: () => {
-            const { dialog } = require('electron');
             dialog.showMessageBox(win, {
               type: 'info',
               title: '关于 Clave',
