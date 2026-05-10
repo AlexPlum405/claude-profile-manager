@@ -3472,7 +3472,538 @@ function getModelFromConfig() {
   return 'claude-sonnet-4-6';
 }
 
-async function testApiFormat(baseUrl, apiKey, model, format, endpointMode = 'auto') {
+// ── 网络诊断：检测系统代理与推荐 NO_PROXY ──
+const RFC1918_RANGES = [
+  { start: ipToInt('10.0.0.0'), end: ipToInt('10.255.255.255'), cidr: '10.0.0.0/8' },
+  { start: ipToInt('172.16.0.0'), end: ipToInt('172.31.255.255'), cidr: '172.16.0.0/12' },
+  { start: ipToInt('192.168.0.0'), end: ipToInt('192.168.255.255'), cidr: '192.168.0.0/16' }
+];
+
+function ipToInt(ip) {
+  const parts = String(ip || '').split('.').map(Number);
+  if (parts.length !== 4 || parts.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return (parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) >>> 0;
+}
+
+function classifyHost(host) {
+  if (!host) return { type: 'empty' };
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return { type: 'loopback' };
+  const intVal = ipToInt(host);
+  if (intVal === null) return { type: 'hostname', value: host };
+  for (const range of RFC1918_RANGES) {
+    if (intVal >= range.start && intVal <= range.end) return { type: 'private', ip: host, cidr: range.cidr };
+  }
+  return { type: 'public', ip: host };
+}
+
+function buildRecommendedNoProxy(baseUrl) {
+  const parts = new Set(['localhost', '127.0.0.1']);
+  try {
+    const url = new URL(baseUrl);
+    const host = url.hostname;
+    const cls = classifyHost(host);
+    if (cls.type === 'private') {
+      parts.add(host);
+      parts.add(cls.cidr);
+    } else if (cls.type === 'hostname') {
+      parts.add(host);
+    }
+  } catch (_) { /* ignore */ }
+  return Array.from(parts).join(',');
+}
+
+async function runNetworkDiagnosis(baseUrl, apiKey, model, format, endpointMode) {
+  const sys = typeof net.detectSystemProxy === 'function' ? net.detectSystemProxy() : { proxyEnv: {}, primary: null, noProxy: '' };
+  const ifaces = typeof net.listLocalNetworkInterfaces === 'function' ? net.listLocalNetworkInterfaces() : [];
+  const hostClass = (() => {
+    try { return classifyHost(new URL(baseUrl).hostname); } catch (_) { return { type: 'invalid' }; }
+  })();
+
+  // 复用测试连接的完整请求（POST + 认证 + body），分别跑直连和经代理两路
+  const directPromise = testApiFormat(baseUrl, apiKey, model, format, endpointMode, '');
+  const proxyPromise = (sys.primary && !sys.primary.unsupported)
+    ? testApiFormat(baseUrl, apiKey, model, format, endpointMode, sys.primary.raw)
+    : Promise.resolve(null);
+
+  const [direct, viaProxy] = await Promise.all([directPromise, proxyPromise]);
+
+  // 判定口径与测试连接完全一致：2xx 算成功
+  const directOk = direct && direct.statusCode >= 200 && direct.statusCode < 300;
+  const proxyOk = viaProxy && viaProxy.statusCode >= 200 && viaProxy.statusCode < 300;
+
+  let recommendation;
+  if (hostClass.type === 'private' || hostClass.type === 'loopback') {
+    recommendation = {
+      strategy: 'bypass',
+      reason: hostClass.type === 'private' ? `目标 ${hostClass.ip} 属于内网段 ${hostClass.cidr}，必须绕过本地代理直连` : '目标为本机回环地址',
+      noProxy: buildRecommendedNoProxy(baseUrl),
+      clearHttp: true
+    };
+  } else if (sys.primary && sys.primary.unsupported) {
+    recommendation = {
+      strategy: 'manual',
+      reason: `检测到不支持的代理协议：${sys.primary.raw}`,
+      noProxy: buildRecommendedNoProxy(baseUrl),
+      clearHttp: false
+    };
+  } else if (sys.primary) {
+    if (directOk && proxyOk) {
+      recommendation = {
+        strategy: 'bypass',
+        reason: '两条路径都能完整调通 API，直连延迟更可控，建议绕过代理（写入 NO_PROXY，防止 Claude Code CLI 走代理）',
+        noProxy: buildRecommendedNoProxy(baseUrl),
+        clearHttp: false
+      };
+    } else if (directOk && !proxyOk) {
+      recommendation = {
+        strategy: 'bypass',
+        reason: '直连能完整调通 API，经代理失败，必须绕过代理（Claude Code CLI 默认会读 HTTP_PROXY）',
+        noProxy: buildRecommendedNoProxy(baseUrl),
+        clearHttp: true
+      };
+    } else if (!directOk && proxyOk) {
+      recommendation = {
+        strategy: 'use-proxy',
+        reason: '直连失败但经代理可达，必须通过代理访问',
+        proxyUrl: sys.primary.raw,
+        noProxy: sys.noProxy || '',
+        clearHttp: false
+      };
+    } else {
+      recommendation = {
+        strategy: 'none-works',
+        reason: '直连与代理均未能成功调通 API，请检查 API Key、网络连通性或上游服务状态',
+        noProxy: buildRecommendedNoProxy(baseUrl),
+        clearHttp: false
+      };
+    }
+  } else {
+    recommendation = {
+      strategy: 'direct',
+      reason: directOk ? '未检测到系统代理，直连可调通 API' : '未检测到系统代理，但直连失败',
+      noProxy: '',
+      clearHttp: false
+    };
+  }
+
+  return {
+    baseUrl,
+    probeUrl: direct ? direct.url : baseUrl,
+    hostClass,
+    systemProxy: sys,
+    interfaces: ifaces,
+    direct,
+    viaProxy,
+    recommendation
+  };
+}
+
+function formatProbeResult(r) {
+  if (!r) return '未测试';
+  if (r.statusCode > 0) return `HTTP ${r.statusCode} · ${r.elapsed}ms`;
+  return `失败：${r.error || '未知错误'} · ${r.elapsed}ms`;
+}
+
+function strategyLabel(strategy) {
+  switch (strategy) {
+    case 'bypass': return '绕过代理直连';
+    case 'use-proxy': return '通过代理访问';
+    case 'direct': return '直连';
+    case 'none-works': return '无可用路径';
+    case 'manual': return '需手动处理';
+    default: return strategy || '';
+  }
+}
+
+function noProxyEntriesEqual(a, b) {
+  const norm = (v) => new Set(String(v || '').split(',').map(s => s.trim()).filter(Boolean));
+  const setA = norm(a);
+  const setB = norm(b);
+  if (setA.size !== setB.size) return false;
+  for (const item of setA) if (!setB.has(item)) return false;
+  return true;
+}
+
+function buildRecommendedEnvPatch(rec, currentEnv = {}) {
+  const patch = { set: {}, unset: [] };
+  if (!rec) return patch;
+  const env = (currentEnv && typeof currentEnv === 'object') ? currentEnv : {};
+
+  if (rec.clearHttp) {
+    ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'].forEach(key => {
+      if (Object.prototype.hasOwnProperty.call(env, key)) patch.unset.push(key);
+    });
+  }
+
+  if (rec.strategy === 'use-proxy' && rec.proxyUrl) {
+    if (env.HTTP_PROXY !== rec.proxyUrl) patch.set.HTTP_PROXY = rec.proxyUrl;
+    if (env.HTTPS_PROXY !== rec.proxyUrl) patch.set.HTTPS_PROXY = rec.proxyUrl;
+  }
+
+  if (rec.noProxy) {
+    if (!noProxyEntriesEqual(env.NO_PROXY, rec.noProxy)) patch.set.NO_PROXY = rec.noProxy;
+    if (!noProxyEntriesEqual(env.no_proxy, rec.noProxy)) patch.set.no_proxy = rec.noProxy;
+  }
+
+  return patch;
+}
+
+function isPatchEmpty(patch) {
+  if (!patch) return true;
+  const hasSet = patch.set && Object.keys(patch.set).length > 0;
+  const hasUnset = patch.unset && patch.unset.length > 0;
+  return !hasSet && !hasUnset;
+}
+
+let lastAppliedNetworkPatch = null;
+
+function applyNetworkPatchToJson(patch, strategy) {
+  if (!patch) return false;
+  const jsonText = getJsonEditorValue();
+  const config = parseJson(jsonText);
+  if (!config) {
+    showAlert('当前 JSON 无效，无法应用推荐。');
+    return false;
+  }
+
+  // 自动快照（永久可恢复的兜底）。reason 带策略标签，用户在历史面板能直接识别。
+  let snapshotInfo = null;
+  const profileForSnapshot = currentLoadedProfile || selectedProfile;
+  if (profileForSnapshot && jsonText && jsonText.trim()) {
+    const label = strategyLabel(strategy) || '未知策略';
+    const reason = `网络诊断前·${label}·${new Date().toLocaleString('zh-CN', { hour12: false })}`.slice(0, 80);
+    try {
+      snapshotInfo = historyApi.writeSnapshot(profileForSnapshot, jsonText, reason);
+      if (typeof refreshHistoryPanel === 'function') refreshHistoryPanel();
+    } catch (err) {
+      console.warn('网络诊断快照保存失败：', err);
+    }
+  }
+
+  const envCreated = !config.env || typeof config.env !== 'object';
+  if (envCreated) config.env = {};
+
+  const touchedKeys = new Set([...(patch.unset || []), ...Object.keys(patch.set || {})]);
+  const snapshot = {};
+  touchedKeys.forEach(key => {
+    snapshot[key] = Object.prototype.hasOwnProperty.call(config.env, key)
+      ? { exists: true, value: config.env[key] }
+      : { exists: false };
+  });
+
+  (patch.unset || []).forEach(key => { delete config.env[key]; });
+  Object.entries(patch.set || {}).forEach(([key, value]) => { config.env[key] = value; });
+  setJsonEditorValue(JSON.stringify(config, null, 2));
+  if (typeof syncFieldsFromJson === 'function') syncFieldsFromJson();
+
+  lastAppliedNetworkPatch = {
+    snapshot,
+    envCreated,
+    touchedKeys: Array.from(touchedKeys),
+    appliedAt: Date.now(),
+    snapshotId: snapshotInfo ? snapshotInfo.id : null,
+    snapshotReason: snapshotInfo ? snapshotInfo.reason : ''
+  };
+
+  const msg = snapshotInfo
+    ? `已应用网络推荐，已保存快照「${snapshotInfo.reason}」。`
+    : '已应用网络诊断推荐到当前配置。';
+  showUndoBar(msg, undoLastNetworkPatch, 20000);
+  return true;
+}
+
+function undoLastNetworkPatch() {
+  const ctx = lastAppliedNetworkPatch;
+  if (!ctx) {
+    showAlert('没有可撤销的网络推荐。');
+    return;
+  }
+  const config = parseJson(getJsonEditorValue());
+  if (!config) {
+    showAlert('当前 JSON 无效，无法撤销。');
+    return;
+  }
+  if (!config.env || typeof config.env !== 'object') config.env = {};
+
+  ctx.touchedKeys.forEach(key => {
+    const prev = ctx.snapshot[key];
+    if (!prev || !prev.exists) {
+      delete config.env[key];
+    } else {
+      config.env[key] = prev.value;
+    }
+  });
+  if (ctx.envCreated && Object.keys(config.env).length === 0) {
+    delete config.env;
+  }
+
+  setJsonEditorValue(JSON.stringify(config, null, 2));
+  if (typeof syncFieldsFromJson === 'function') syncFieldsFromJson();
+  lastAppliedNetworkPatch = null;
+  hideUndoBar();
+  showAlert('已撤销网络诊断推荐。');
+}
+
+function hideUndoBar() {
+  const existing = document.getElementById('undoBar');
+  if (existing) existing.remove();
+}
+
+function showUndoBar(message, onUndo, ttlMs = 20000) {
+  hideUndoBar();
+
+  const bar = document.createElement('div');
+  bar.id = 'undoBar';
+  Object.assign(bar.style, {
+    position: 'fixed',
+    bottom: '24px',
+    left: '50%',
+    transform: 'translateX(-50%)',
+    background: 'var(--text-main)',
+    color: 'white',
+    padding: '10px 14px',
+    borderRadius: '10px',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.18)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    fontSize: '13px',
+    zIndex: '9999',
+    maxWidth: 'calc(100% - 48px)'
+  });
+
+  const text = document.createElement('span');
+  text.textContent = message;
+  text.style.flex = '1';
+
+  const undoBtn = document.createElement('button');
+  undoBtn.textContent = '撤销';
+  Object.assign(undoBtn.style, {
+    background: 'rgba(255,255,255,0.15)',
+    border: '1px solid rgba(255,255,255,0.3)',
+    color: 'white',
+    padding: '4px 12px',
+    borderRadius: '6px',
+    fontSize: '12px',
+    cursor: 'pointer'
+  });
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.setAttribute('aria-label', '关闭');
+  Object.assign(closeBtn.style, {
+    background: 'transparent',
+    border: 'none',
+    color: 'rgba(255,255,255,0.7)',
+    fontSize: '18px',
+    lineHeight: '1',
+    cursor: 'pointer',
+    padding: '0 4px'
+  });
+
+  const timer = setTimeout(() => hideUndoBar(), ttlMs);
+
+  undoBtn.onclick = () => {
+    clearTimeout(timer);
+    if (typeof onUndo === 'function') onUndo();
+  };
+  closeBtn.onclick = () => {
+    clearTimeout(timer);
+    hideUndoBar();
+  };
+
+  bar.appendChild(text);
+  bar.appendChild(undoBtn);
+  bar.appendChild(closeBtn);
+  document.body.appendChild(bar);
+}
+
+function renderDiagnosisDialog(diag) {
+  const existing = document.getElementById('networkDiagnosisDialog');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'networkDiagnosisDialog';
+  overlay.className = 'dialog-overlay';
+
+  const dialog = document.createElement('div');
+  dialog.className = 'dialog-card wide';
+  dialog.style.maxWidth = '640px';
+
+  const title = document.createElement('div');
+  title.className = 'dialog-message';
+  title.style.fontSize = '15px';
+  title.style.fontWeight = '600';
+  title.style.marginBottom = '12px';
+  title.textContent = '网络诊断报告';
+  dialog.appendChild(title);
+
+  const sys = diag.systemProxy || {};
+  const rec = diag.recommendation || {};
+  const hostClass = diag.hostClass || {};
+  const currentEnv = (parseJson(getJsonEditorValue()) || {}).env || {};
+  const patch = buildRecommendedEnvPatch(rec, currentEnv);
+  const patchEmpty = isPatchEmpty(patch);
+
+  const section = (label, body) => {
+    const wrap = document.createElement('div');
+    wrap.style.marginBottom = '10px';
+    const lbl = document.createElement('div');
+    lbl.style.fontSize = '11px';
+    lbl.style.color = 'var(--text-muted)';
+    lbl.style.textTransform = 'uppercase';
+    lbl.style.letterSpacing = '0.04em';
+    lbl.style.marginBottom = '4px';
+    lbl.textContent = label;
+    const bd = document.createElement('div');
+    bd.style.fontSize = '12px';
+    bd.style.fontFamily = 'ui-monospace, monospace';
+    bd.style.whiteSpace = 'pre-wrap';
+    bd.style.wordBreak = 'break-all';
+    bd.textContent = body;
+    wrap.appendChild(lbl);
+    wrap.appendChild(bd);
+    return wrap;
+  };
+
+  const hostSummary = hostClass.type === 'private'
+    ? `${hostClass.ip} · 内网 (${hostClass.cidr})`
+    : hostClass.type === 'public'
+    ? `${hostClass.ip} · 公网`
+    : hostClass.type === 'hostname'
+    ? `${hostClass.value} · 域名`
+    : hostClass.type === 'loopback'
+    ? '回环地址'
+    : '无效或未填写';
+  dialog.appendChild(section('API 目标', `${diag.baseUrl}\n${hostSummary}`));
+
+  const proxySummary = sys.primary
+    ? (sys.primary.unsupported ? `不支持的代理：${sys.primary.raw}` : `${sys.primary.protocol}//${sys.primary.host}:${sys.primary.port}${sys.primary.hasAuth ? ' (含认证)' : ''}`)
+    : '未检测到';
+  const envLines = Object.entries(sys.proxyEnv || {}).map(([k, v]) => `${k}=${v}`).join('\n') || '（无相关环境变量）';
+  dialog.appendChild(section('系统代理', `${proxySummary}\n\n${envLines}`));
+
+  dialog.appendChild(section('探测结果', `直连：${formatProbeResult(diag.direct)}\n经代理：${formatProbeResult(diag.viaProxy)}\n\n说明：诊断使用与「测试连接」完全一致的请求（POST + 认证 + 业务端点），分别通过直连和系统代理各发一次，判定口径为 HTTP 2xx。`));
+
+  const recBox = document.createElement('div');
+  recBox.style.background = 'rgba(212, 145, 110, 0.08)';
+  recBox.style.border = '1px solid rgba(212, 145, 110, 0.3)';
+  recBox.style.borderRadius = '8px';
+  recBox.style.padding = '10px 12px';
+  recBox.style.marginBottom = '12px';
+  const recTitle = document.createElement('div');
+  recTitle.style.fontSize = '12px';
+  recTitle.style.fontWeight = '600';
+  recTitle.style.marginBottom = '4px';
+  recTitle.textContent = `建议策略：${strategyLabel(rec.strategy)}`;
+  const recReason = document.createElement('div');
+  recReason.style.fontSize = '12px';
+  recReason.style.color = 'var(--text-muted)';
+  recReason.style.marginBottom = '8px';
+  recReason.textContent = rec.reason || '';
+  recBox.appendChild(recTitle);
+  recBox.appendChild(recReason);
+
+  const patchLines = [];
+  (patch.unset || []).forEach(k => patchLines.push(`- ${k}`));
+  Object.entries(patch.set || {}).forEach(([k, v]) => patchLines.push(`+ ${k}=${v}`));
+  if (patchEmpty) {
+    const done = document.createElement('div');
+    done.style.fontSize = '12px';
+    done.style.color = 'var(--text-muted)';
+    done.style.fontStyle = 'italic';
+    done.textContent = '当前 env 已符合推荐策略，无需变更。';
+    recBox.appendChild(done);
+  } else if (patchLines.length > 0) {
+    const pre = document.createElement('div');
+    pre.style.fontFamily = 'ui-monospace, monospace';
+    pre.style.fontSize = '11.5px';
+    pre.style.whiteSpace = 'pre-wrap';
+    pre.style.wordBreak = 'break-all';
+    pre.textContent = patchLines.join('\n');
+    recBox.appendChild(pre);
+  }
+  dialog.appendChild(recBox);
+
+  const actions = document.createElement('div');
+  actions.className = 'dialog-actions';
+
+  const btnClose = document.createElement('button');
+  btnClose.className = 'btn-action btn-secondary';
+  btnClose.textContent = '关闭';
+  btnClose.onclick = () => overlay.remove();
+
+  const btnCopy = document.createElement('button');
+  btnCopy.className = 'btn-action btn-secondary';
+  btnCopy.textContent = '复制报告';
+  btnCopy.onclick = () => {
+    const text = [
+      `API 目标: ${diag.baseUrl} (${hostSummary})`,
+      `系统代理: ${proxySummary}`,
+      `直连: ${formatProbeResult(diag.direct)}`,
+      `经代理: ${formatProbeResult(diag.viaProxy)}`,
+      `建议: ${strategyLabel(rec.strategy)} — ${rec.reason || ''}`,
+      ...patchLines
+    ].join('\n');
+    clipboard.writeText(text);
+    showAlert('诊断报告已复制到剪贴板。');
+  };
+
+  const btnApply = document.createElement('button');
+  btnApply.className = 'btn-action btn-primary';
+  btnApply.textContent = patchEmpty ? '已是最优配置' : '应用推荐到当前配置';
+  btnApply.disabled = patchEmpty;
+  btnApply.onclick = () => {
+    if (applyNetworkPatchToJson(patch, rec.strategy)) overlay.remove();
+  };
+
+  actions.appendChild(btnClose);
+  actions.appendChild(btnCopy);
+  actions.appendChild(btnApply);
+  dialog.appendChild(actions);
+
+  overlay.appendChild(dialog);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
+}
+
+async function diagnoseNetwork() {
+  const btn = document.getElementById('diagnoseBtn');
+  if (btn) { btn.disabled = true; btn.innerText = '诊断中...'; }
+  try {
+    syncJsonFromFields();
+    const config = parseJson(getJsonEditorValue()) || {};
+    const env = config.env || {};
+    const baseUrl = env.ANTHROPIC_BASE_URL || document.getElementById('baseUrl')?.value?.trim() || '';
+    const apiKey = env.ANTHROPIC_AUTH_TOKEN || document.getElementById('apiKey')?.value?.trim() || '';
+    if (!baseUrl) {
+      showAlert('请先填写 ANTHROPIC_BASE_URL。');
+      return;
+    }
+    if (!apiKey) {
+      showAlert('请先填写 API 密钥，诊断需要与测试连接走完全一致的请求。');
+      return;
+    }
+
+    const model = getModelFromConfig();
+    const endpointMode = getCurrentEndpointMode();
+    const formatId = config.apiFormat && config.apiFormat.id;
+    const format = (formatId && getFormatById(formatId)) || sortFormatsByUrl(API_FORMATS, baseUrl)[0];
+    if (!format) {
+      showAlert('未找到可用的 API 格式，无法执行诊断。');
+      return;
+    }
+
+    const diag = await runNetworkDiagnosis(baseUrl, apiKey, model, format, endpointMode);
+    renderDiagnosisDialog(diag);
+  } catch (err) {
+    showAlert(`网络诊断失败：${err.message || String(err)}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerText = '网络诊断'; }
+  }
+}
+
+async function testApiFormat(baseUrl, apiKey, model, format, endpointMode = 'auto', proxyUrl = '') {
   let finalUrl = baseUrl.replace(/\/$/, '');
 
   if (endpointMode === 'direct') {
@@ -3508,7 +4039,8 @@ async function testApiFormat(baseUrl, apiKey, model, format, endpointMode = 'aut
     method: 'POST',
     timeout: 30000,
     headers,
-    body: postData
+    body: postData,
+    proxyUrl
   });
   const success = result.statusCode === 200;
   return {

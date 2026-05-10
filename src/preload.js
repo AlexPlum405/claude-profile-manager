@@ -443,7 +443,23 @@ async function writeExportProfilesZip(filePath, manifest, profiles) {
   ensurePrivateMode(normalized);
 }
 
-function requestJson({ url, method = 'GET', headers = {}, body = '', timeout = 30000 }) {
+function parseProxyUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  try {
+    const url = new URL(raw);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    return {
+      protocol: url.protocol,
+      hostname: url.hostname,
+      port: parseInt(url.port, 10) || (url.protocol === 'https:' ? 443 : 80),
+      auth: url.username ? `${url.username}:${decodeURIComponent(url.password || '')}` : ''
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+function requestJson({ url, method = 'GET', headers = {}, body = '', timeout = 30000, proxyUrl = '' }) {
   return new Promise((resolve) => {
     let parsedUrl;
     try {
@@ -456,23 +472,40 @@ function requestJson({ url, method = 'GET', headers = {}, body = '', timeout = 3
       return;
     }
 
+    const proxy = parseProxyUrl(proxyUrl);
     const client = parsedUrl.protocol === 'https:' ? https : http;
     const requestHeaders = Object.assign({}, headers);
     if (body && !requestHeaders['Content-Length']) {
       requestHeaders['Content-Length'] = Buffer.byteLength(body);
     }
 
-    const options = {
-      hostname: parsedUrl.hostname,
-      port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
-      path: `${parsedUrl.pathname}${parsedUrl.search}`,
-      method,
-      timeout,
-      headers: requestHeaders
-    };
+    let options;
+    if (proxy && parsedUrl.protocol === 'http:') {
+      options = {
+        hostname: proxy.hostname,
+        port: proxy.port,
+        path: url,
+        method,
+        timeout,
+        headers: Object.assign({ Host: parsedUrl.host }, requestHeaders)
+      };
+      if (proxy.auth) {
+        options.headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(proxy.auth).toString('base64');
+      }
+    } else {
+      options = {
+        hostname: parsedUrl.hostname,
+        port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? 443 : 80),
+        path: `${parsedUrl.pathname}${parsedUrl.search}`,
+        method,
+        timeout,
+        headers: requestHeaders
+      };
+    }
 
     const startTime = Date.now();
-    const req = client.request(options, (res) => {
+
+    const handleResponse = (res) => {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
@@ -485,17 +518,75 @@ function requestJson({ url, method = 'GET', headers = {}, body = '', timeout = 3
           error: res.statusCode >= 200 && res.statusCode < 300 ? null : data
         });
       });
-    });
+    };
 
-    req.on('error', (error) => {
+    const handleError = (error) => {
       resolve({
         success: false,
         statusCode: 0,
         elapsed: Date.now() - startTime,
         url,
-        error: error.message
+        error: error.message || String(error)
       });
-    });
+    };
+
+    if (proxy && parsedUrl.protocol === 'https:') {
+      const targetPort = parsedUrl.port || 443;
+      const connectHeaders = { Host: `${parsedUrl.hostname}:${targetPort}` };
+      if (proxy.auth) {
+        connectHeaders['Proxy-Authorization'] = 'Basic ' + Buffer.from(proxy.auth).toString('base64');
+      }
+      const connectReq = http.request({
+        host: proxy.hostname,
+        port: proxy.port,
+        method: 'CONNECT',
+        path: `${parsedUrl.hostname}:${targetPort}`,
+        timeout,
+        headers: connectHeaders
+      });
+      connectReq.on('connect', (connectRes, socket) => {
+        if (connectRes.statusCode !== 200) {
+          socket.destroy();
+          resolve({
+            success: false,
+            statusCode: connectRes.statusCode,
+            elapsed: Date.now() - startTime,
+            url,
+            error: `代理 CONNECT 失败：HTTP ${connectRes.statusCode}`
+          });
+          return;
+        }
+        const tunneled = https.request({
+          hostname: parsedUrl.hostname,
+          port: targetPort,
+          path: `${parsedUrl.pathname}${parsedUrl.search}`,
+          method,
+          timeout,
+          headers: requestHeaders,
+          socket,
+          agent: false
+        }, handleResponse);
+        tunneled.on('error', handleError);
+        tunneled.on('timeout', () => {
+          tunneled.destroy();
+          resolve({ success: false, statusCode: 0, elapsed: Date.now() - startTime, url, error: '连接超时' });
+        });
+        if (body) tunneled.write(body);
+        tunneled.end();
+      });
+      connectReq.on('error', handleError);
+      connectReq.on('timeout', () => {
+        connectReq.destroy();
+        resolve({ success: false, statusCode: 0, elapsed: Date.now() - startTime, url, error: '代理连接超时' });
+      });
+      connectReq.end();
+      return;
+    }
+
+    const useClient = (proxy && parsedUrl.protocol === 'http:') ? http : client;
+    const req = useClient.request(options, handleResponse);
+
+    req.on('error', handleError);
 
     req.on('timeout', () => {
       req.destroy();
@@ -511,6 +602,55 @@ function requestJson({ url, method = 'GET', headers = {}, body = '', timeout = 3
     if (body) req.write(body);
     req.end();
   });
+}
+
+function detectSystemProxy() {
+  const envKeys = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+  const env = {};
+  envKeys.forEach((key) => {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  });
+
+  const primary = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy || '';
+  const noProxy = env.NO_PROXY || env.no_proxy || '';
+
+  let parsed = null;
+  if (primary) {
+    const parsedUrl = parseProxyUrl(primary);
+    if (parsedUrl) {
+      parsed = {
+        raw: primary,
+        protocol: parsedUrl.protocol,
+        host: parsedUrl.hostname,
+        port: parsedUrl.port,
+        hasAuth: !!parsedUrl.auth
+      };
+    } else {
+      parsed = { raw: primary, unsupported: true };
+    }
+  }
+
+  return {
+    proxyEnv: env,
+    primary: parsed,
+    noProxy,
+    platform: process.platform
+  };
+}
+
+function listLocalNetworkInterfaces() {
+  const interfaces = os.networkInterfaces();
+  const result = [];
+  Object.keys(interfaces || {}).forEach((name) => {
+    (interfaces[name] || []).forEach((addr) => {
+      if (!addr || addr.internal) return;
+      if (addr.family === 'IPv4' || addr.family === 4) {
+        result.push({ name, address: addr.address, netmask: addr.netmask, cidr: addr.cidr || '' });
+      }
+    });
+  });
+  return result;
 }
 
 function getPathForFile(file) {
@@ -679,5 +819,5 @@ contextBridge.exposeInMainWorld('claveApi', {
     }
   },
   ipcRenderer: { invoke, send, on },
-  net: { requestJson }
+  net: { requestJson, detectSystemProxy, listLocalNetworkInterfaces }
 });
