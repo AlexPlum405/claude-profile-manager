@@ -1,6 +1,6 @@
 {
   "name": "clave",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Clave - Claude Code 配置快速切换工具",
   "main": "src/main.js",
   "scripts": {
